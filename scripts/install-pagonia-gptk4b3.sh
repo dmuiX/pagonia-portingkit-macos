@@ -5,13 +5,21 @@
 
 set -euo pipefail
 
+# Do not resolve security-sensitive tools through an inherited search path.
+export PATH='/usr/bin:/bin:/usr/sbin:/sbin'
+OPEN_COMMAND=${PAGONIA_OPEN_COMMAND:-/usr/bin/open}
+PGREP_COMMAND=${PAGONIA_PGREP_COMMAND:-/usr/bin/pgrep}
+SLEEP_COMMAND=${PAGONIA_SLEEP_COMMAND:-/bin/sleep}
+
 SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd -P)
-SOURCE_PREFIX='auto'
+SOURCE_PREFIX=''
 GPTK_LIB=''
 ENGINE_ARCHIVE_NAME='WS12WineSikarugir10.0_2-20251028-pagonia.tar.xz'
 WRAPPER_ARCHIVE_NAME='Wineskin-3.0.6-2.app.tar.xz'
 ENGINE_ARCHIVE="$SCRIPT_DIR/$ENGINE_ARCHIVE_NAME"
 WRAPPER_ARCHIVE="$SCRIPT_DIR/$WRAPPER_ARCHIVE_NAME"
+GPTK_HASH_MANIFEST="$SCRIPT_DIR/gptk-4.0b3-SHA256SUMS"
+GPTK_LINK_MANIFEST="$SCRIPT_DIR/gptk-4.0b3-SYMLINKS"
 GPTK_LIB_EXPLICIT=0
 GPTK_DOWNLOAD_URL='https://developer.apple.com/download/all/?q=Game%20Porting%20Toolkit'
 GPTK_DEFAULT_LIB='/Volumes/Evaluation environment for Windows games 4.0 beta 3/redist/lib'
@@ -24,6 +32,9 @@ FORCE_FRESH=0
 
 EXPECTED_ENGINE_ARCHIVE='0598a60af56d67b1efd35ac0751cbcc34a30a0329e2788e182dd67a5698f9353'
 EXPECTED_WRAPPER_ARCHIVE='dc97a4ff0f75b74a62b8571d4fe56387648f3755169e1dd8186b8f3d39aa597b'
+EXPECTED_GPTK_HASH_MANIFEST='702296dc74d7522c43eb95d7ae1d697cd4ac1eb5523d643c47fc9c13ff89432c'
+EXPECTED_GPTK_LINK_MANIFEST='26fbf032714eccd6254d3a1745cb39c12b886e58a6cec747ed4e15744a4bc952'
+EXPECTED_STEAM_SETUP='7d3654531c32d941b8cae81c4137fc542172bfa9635f169cb392f245a0a12bcb'
 EXPECTED_BUILD_ID='25784167'
 EXPECTED_GAME_EXE='a4c8aa367a7164e3621ff86819bd5135616da0b1a4afea6b14f0eeb5e9901f46'
 EXPECTED_WINESKIN_LAUNCHER='217d7f3cf154d7117103934c9ec9b952b7209412132f2ad61565fb24d6e56697'
@@ -42,8 +53,8 @@ usage() {
 Usage: install-pagonia-gptk4b3.sh [options]
 
 Options:
-  --source-prefix PATH  Optional existing Pagonia prefix (default: auto-detect).
-  --fresh               Do not reuse a Pagonia prefix; install Steam/game anew.
+  --source-prefix PATH  Explicitly reuse a trusted local Pagonia prefix.
+  --fresh               Install Steam/game anew (the default).
   --gptk-lib PATH       GPTK 4.0 beta 3 redist/lib directory.
   --destination PATH    Destination .app path.
   --replace             Back up and replace an existing destination.
@@ -54,8 +65,8 @@ Options:
 Default behavior:
   1. Verify the bundled, exact known-good Wine/Wineskin runtime.
   2. Verify the user-supplied GPTK 4.0b3 runtime.
-  3. Offer a verified existing Pagonia prefix as an optional fast path.
-  4. If none exists, install official Windows Steam and wait for the user to
+  3. Reuse a prefix only when explicitly supplied as trusted input.
+  4. Otherwise install pinned official Windows Steam and wait for the user to
      sign in and install Pioneers of Pagonia.
   5. Configure the two game-provided D3D12 bypasses in Steam LaunchOptions.
   6. Create a Pagonia application icon and register the app with Launch Services.
@@ -81,23 +92,31 @@ done
 
 [[ -z "$GPTK_LIB" ]] || GPTK_LIB=${GPTK_LIB%/}
 DESTINATION=${DESTINATION%/}
-[[ "$SOURCE_PREFIX" == 'auto' ]] || SOURCE_PREFIX=${SOURCE_PREFIX%/}
+[[ -z "$SOURCE_PREFIX" ]] || SOURCE_PREFIX=${SOURCE_PREFIX%/}
+WORK_ROOT=''
 STAGING=''
-WRAPPER_EXTRACT=''
-ENGINE_EXTRACT=''
 BACKUP=''
+BACKUP_MOVED=0
 PUBLISHED=0
+PUBLISHED_DEVICE=''
+PUBLISHED_INODE=''
 SUCCESS=0
 STEAM_SETUP_DOWNLOAD=''
 
 sha256() { shasum -a 256 "$1" | awk '{print $1}'; }
 
 require_file() {
-  [[ -f "$1" ]] || { echo "ERROR: Missing file: $1" >&2; exit 1; }
+  [[ -f "$1" && ! -L "$1" ]] || {
+    echo "ERROR: Missing, non-regular, or symbolic-link file: $1" >&2
+    exit 1
+  }
 }
 
 require_dir() {
-  [[ -d "$1" ]] || { echo "ERROR: Missing directory: $1" >&2; exit 1; }
+  [[ -d "$1" && ! -L "$1" ]] || {
+    echo "ERROR: Missing or symbolic-link directory: $1" >&2
+    exit 1
+  }
 }
 
 require_hash() {
@@ -112,13 +131,137 @@ require_hash() {
   fi
 }
 
-is_expected_gptk_lib() {
+verify_archive_layout() {
+  local archive=$1 expected_root=$2 max_expanded=$3
+  python3 - "$archive" "$expected_root" "$max_expanded" <<'PY'
+import posixpath
+import stat
+import sys
+import tarfile
+
+archive, expected_root, max_expanded = sys.argv[1], sys.argv[2], int(sys.argv[3])
+seen = set()
+total = 0
+with tarfile.open(archive, 'r:*') as handle:
+    for member in handle:
+        normalized = posixpath.normpath(member.name)
+        if (normalized.startswith('/') or normalized in ('.', '..') or
+                normalized.startswith('../') or
+                not (normalized == expected_root or
+                     normalized.startswith(expected_root + '/'))):
+            raise SystemExit(f'Unsafe archive member path: {member.name}')
+        if normalized in seen:
+            raise SystemExit(f'Duplicate archive member: {member.name}')
+        seen.add(normalized)
+        total += max(member.size, 0)
+        if total > max_expanded:
+            raise SystemExit('Archive exceeds the permitted expanded size')
+        if member.isdev() or member.mode & (stat.S_ISUID | stat.S_ISGID):
+            raise SystemExit(f'Unsafe archive member type/mode: {member.name}')
+        if member.islnk():
+            raise SystemExit(f'Archive hard links are not permitted: {member.name}')
+        if member.issym():
+            target = posixpath.normpath(
+                posixpath.join(posixpath.dirname(normalized), member.linkname)
+            )
+            if not (target == expected_root or target.startswith(expected_root + '/')):
+                raise SystemExit(f'Escaping archive link: {member.name} -> {member.linkname}')
+            stripped = normalized.removeprefix(expected_root).lstrip('/')
+            stripped_target = posixpath.normpath(
+                posixpath.join(posixpath.dirname(stripped), member.linkname)
+            )
+            if stripped_target == '..' or stripped_target.startswith('../'):
+                raise SystemExit(f'Link escapes after root stripping: {member.name}')
+if not seen:
+    raise SystemExit('Archive is empty')
+PY
+}
+
+verify_gptk_lib() {
   local path=${1%/}
-  [[ -d "$path/external" && -d "$path/wine" \
-     && -f "$path/wine/x86_64-windows/dxgi.dll" \
-     && -f "$path/wine/x86_64-windows/d3d12.dll" ]] || return 1
-  [[ "$(sha256 "$path/wine/x86_64-windows/dxgi.dll")" == "$EXPECTED_DXGI" \
-     && "$(sha256 "$path/wine/x86_64-windows/d3d12.dll")" == "$EXPECTED_D3D12" ]]
+  [[ "$path" == /Volumes/*/redist/lib ]] || {
+    echo "GPTK must be on a mounted volume: $path" >&2
+    return 1
+  }
+  [[ -d "$path/external" && ! -L "$path/external" \
+     && -d "$path/wine" && ! -L "$path/wine" \
+     && ! -w "$path" ]] || {
+    echo "GPTK library is missing, linked, or writable: $path" >&2
+    return 1
+  }
+  python3 - "$path" "$GPTK_HASH_MANIFEST" "$GPTK_LINK_MANIFEST" <<'PY'
+from hashlib import sha256
+from pathlib import Path
+import os
+import plistlib
+import stat
+import subprocess
+import sys
+
+root = Path(sys.argv[1])
+df = subprocess.run(['/bin/df', str(root)], check=True, text=True,
+                    capture_output=True).stdout.splitlines()
+if len(df) < 2:
+    raise SystemExit('Could not identify GPTK filesystem')
+device = df[-1].split()[0]
+info = plistlib.loads(subprocess.run(
+    ['/usr/sbin/diskutil', 'info', '-plist', device], check=True,
+    capture_output=True).stdout)
+mount = Path(info.get('MountPoint', '')).resolve(strict=True)
+if info.get('Writable', True) or info.get('WritableVolume', True):
+    raise SystemExit(f'GPTK filesystem is writable: {mount}')
+resolved_root = root.resolve(strict=True)
+if mount != resolved_root and mount not in resolved_root.parents:
+    raise SystemExit(f'GPTK path is not on its reported mount: {resolved_root}')
+expected_hashes = {}
+for line in Path(sys.argv[2]).read_text().splitlines():
+    digest, name = line.split('  ', 1)
+    expected_hashes[name] = digest
+expected_links = {}
+for line in Path(sys.argv[3]).read_text().splitlines():
+    name, target = line.split('\t', 1)
+    expected_links[name] = target
+actual_hashes = {}
+actual_links = {}
+for base in ('external', 'wine'):
+    for current, dirs, files in os.walk(root / base, followlinks=False):
+        for name in dirs + files:
+            path = Path(current) / name
+            rel = path.relative_to(root).as_posix()
+            mode = path.lstat().st_mode
+            if stat.S_ISLNK(mode):
+                actual_links[rel] = os.readlink(path)
+            elif stat.S_ISREG(mode):
+                actual_hashes[rel] = sha256(path.read_bytes()).hexdigest()
+            elif not stat.S_ISDIR(mode):
+                raise SystemExit(f'Unsupported GPTK file type: {rel}')
+if actual_hashes != expected_hashes:
+    missing = sorted(expected_hashes.keys() - actual_hashes.keys())
+    extra = sorted(actual_hashes.keys() - expected_hashes.keys())
+    changed = sorted(k for k in expected_hashes.keys() & actual_hashes.keys()
+                     if expected_hashes[k] != actual_hashes[k])
+    raise SystemExit(f'GPTK file manifest mismatch: missing={missing}, extra={extra}, changed={changed}')
+if actual_links != expected_links:
+    raise SystemExit(f'GPTK symlink manifest mismatch: expected={expected_links}, actual={actual_links}')
+PY
+  local executable count=0
+  while IFS= read -r -d '' executable; do
+    if file "$executable" | grep -q 'Mach-O'; then
+      codesign --verify --strict -R='anchor apple' "$executable" 2>/dev/null || {
+        echo "GPTK executable is not validly Apple-signed: $executable" >&2
+        return 1
+      }
+      count=$((count + 1))
+    fi
+  done < <(find "$path/external" "$path/wine" -type f -print0)
+  [[ $count -eq 6 ]] || {
+    echo "Expected 6 Apple-signed GPTK Mach-O files, found $count" >&2
+    return 1
+  }
+}
+
+is_expected_gptk_lib() {
+  verify_gptk_lib "${1%/}" >/dev/null
 }
 
 find_mounted_gptk_lib() {
@@ -152,7 +295,7 @@ for path in sorted(root.glob('*.dmg'), key=lambda item: item.stat().st_mtime,
     product = ('game porting toolkit' in normalized or
                'evaluation environment for windows games' in normalized)
     version = re.search(r'\b4(?: 0)? beta 3\b', normalized)
-    if product and version:
+    if product and version and path.is_file() and not path.is_symlink():
         print(path)
         break
 else:
@@ -163,7 +306,7 @@ PY
 mount_gptk_dmg() {
   local dmg=$1 output
   echo "Mounting GPTK disk image: $dmg" >&2
-  if ! output=$(hdiutil attach -nobrowse "$dmg" 2>&1); then
+  if ! output=$(diskutil image attach --nobrowse --readOnly "$dmg" 2>&1); then
     echo "$output" >&2
     return 1
   fi
@@ -193,7 +336,7 @@ resolve_gptk_lib() {
     echo "Download it manually from: $GPTK_DOWNLOAD_URL" >&2
     exit 1
   fi
-  open "$GPTK_DOWNLOAD_URL"
+  "$OPEN_COMMAND" "$GPTK_DOWNLOAD_URL"
   while true; do
     echo
     echo 'Download “Game Porting Toolkit 4.0 beta 3” from Apple.'
@@ -233,37 +376,166 @@ yes_no() {
   fi
 }
 
+atomic_rename_exclusive() {
+  python3 - "$1" "$2" <<'PY'
+import ctypes
+import os
+import sys
+
+source, destination = map(os.path.abspath, sys.argv[1:3])
+source_parent, source_name = os.path.split(source)
+destination_parent, destination_name = os.path.split(destination)
+flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+source_fd = os.open(source_parent, flags)
+destination_fd = os.open(destination_parent, flags)
+try:
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameatx_np = libc.renameatx_np
+    renameatx_np.argtypes = [ctypes.c_int, ctypes.c_char_p,
+                             ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    renameatx_np.restype = ctypes.c_int
+    RENAME_EXCL = 0x00000004
+    if renameatx_np(source_fd, os.fsencode(source_name),
+                    destination_fd, os.fsencode(destination_name),
+                    RENAME_EXCL) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), destination)
+finally:
+    os.close(source_fd)
+    os.close(destination_fd)
+PY
+}
+
+same_identity() {
+  local path=$1 device=$2 inode=$3
+  [[ -e "$path" && ! -L "$path" \
+     && "$(stat -f '%d' "$path")" == "$device" \
+     && "$(stat -f '%i' "$path")" == "$inode" ]]
+}
+
+unique_sibling_path() {
+  python3 - "$1" "$2" <<'PY'
+from pathlib import Path
+import secrets
+import sys
+
+path = Path(sys.argv[1])
+print(f'{path}.{sys.argv[2]}-{secrets.token_hex(12)}')
+PY
+}
+
+validate_destination() {
+  python3 - "$1" "$(id -u)" <<'PY'
+from pathlib import Path
+import grp
+import os
+import stat
+import sys
+
+raw = sys.argv[1]
+uid = int(sys.argv[2])
+if not raw.startswith('/') or not raw.endswith('.app'):
+    raise SystemExit('Destination must be an absolute .app path')
+path = Path(raw)
+parent = path.parent.resolve(strict=True)
+if parent != path.parent:
+    raise SystemExit('Destination parent must not contain symbolic links')
+info = parent.stat()
+if info.st_mode & stat.S_IWOTH:
+    raise SystemExit('Destination parent must not be world-writable')
+if info.st_uid not in (0, uid):
+    raise SystemExit('Destination parent must be owned by root or the current user')
+if info.st_mode & stat.S_IWGRP:
+    group = grp.getgrgid(info.st_gid).gr_name
+    if info.st_uid != 0 or group not in ('admin', 'wheel'):
+        raise SystemExit('Destination parent has an untrusted writable group')
+print(parent / path.name)
+PY
+}
+
+validate_trusted_prefix_paths() {
+  python3 - "$1" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1]).resolve(strict=True)
+critical = [
+    'system.reg', 'user.reg',
+    'drive_c/windows/system32',
+    'drive_c/windows/system32/dxgi.dll',
+    'drive_c/windows/system32/d3d12.dll',
+    'drive_c/windows/system32/d3d12core.dll',
+    'drive_c/Program Files (x86)/Steam/steam.exe',
+    'drive_c/Program Files (x86)/Steam/steamapps/appmanifest_2155180.acf',
+    'drive_c/Program Files (x86)/Steam/steamapps/common/Pioneers of Pagonia/Pioneers of Pagonia.exe',
+    'drive_c/Program Files (x86)/Steam/steamapps/common/Pioneers of Pagonia/dxil.dll',
+]
+steam = root / 'drive_c/Program Files (x86)/Steam'
+critical.extend(str(path.relative_to(root))
+                for path in steam.glob('userdata/*/config/localconfig.vdf'))
+for relative in critical:
+    path = root / relative
+    current = root
+    for part in Path(relative).parts:
+        current /= part
+        if current.is_symlink():
+            raise SystemExit(f'Critical prefix path is a symbolic link: {current}')
+    resolved = path.resolve(strict=True)
+    if root != resolved and root not in resolved.parents:
+        raise SystemExit(f'Critical prefix path escapes prefix: {path}')
+PY
+}
+
 cleanup() {
   local status=$?
   if [[ $PUBLISHED -eq 1 && $SUCCESS -ne 1 ]]; then
     local deployed_prefix failed
-    deployed_prefix="$DESTINATION/Contents/SharedSupport/prefix"
-    if [[ -x "$DESTINATION/Contents/SharedSupport/wine/bin/wineserver" ]]; then
-      WINEPREFIX="$deployed_prefix" \
-        "$DESTINATION/Contents/SharedSupport/wine/bin/wineserver" -k \
-        2>/dev/null || true
-    fi
-    if [[ -e "$DESTINATION" ]]; then
-      failed="${DESTINATION}.failed-$(date +%Y%m%d-%H%M%S)"
-      mv "$DESTINATION" "$failed" || rm -rf "$DESTINATION"
-      echo "Failed deployment preserved at: $failed" >&2
+    if same_identity "$DESTINATION" "$PUBLISHED_DEVICE" "$PUBLISHED_INODE"; then
+      deployed_prefix="$DESTINATION/Contents/SharedSupport/prefix"
+      if [[ -x "$DESTINATION/Contents/SharedSupport/wine/bin/wineserver" ]]; then
+        WINEPREFIX="$deployed_prefix" \
+          "$DESTINATION/Contents/SharedSupport/wine/bin/wineserver" -k \
+          2>/dev/null || true
+      fi
+      failed=$(unique_sibling_path "$DESTINATION" failed)
+      if atomic_rename_exclusive "$DESTINATION" "$failed"; then
+        echo "Failed deployment preserved at: $failed" >&2
+      else
+        echo "ERROR: Could not preserve failed deployment; left untouched: $DESTINATION" >&2
+      fi
+    else
+      echo "ERROR: Published destination identity changed; cleanup left it untouched: $DESTINATION" >&2
     fi
     if [[ -n "$BACKUP" && -e "$BACKUP" && ! -e "$DESTINATION" ]]; then
-      mv "$BACKUP" "$DESTINATION"
-      echo "Previous deployment restored: $DESTINATION" >&2
+      if atomic_rename_exclusive "$BACKUP" "$DESTINATION"; then
+        echo "Previous deployment restored: $DESTINATION" >&2
+      else
+        echo "ERROR: Could not restore previous deployment: $BACKUP" >&2
+      fi
     fi
-  fi
-  if [[ -n "$STAGING" && -e "$STAGING" ]]; then
-    if [[ $status -eq 0 && $SUCCESS -eq 1 ]]; then
-      rm -rf "$STAGING"
+  elif [[ $BACKUP_MOVED -eq 1 && -n "$BACKUP" \
+          && -e "$BACKUP" && ! -e "$DESTINATION" ]]; then
+    if atomic_rename_exclusive "$BACKUP" "$DESTINATION"; then
+      BACKUP_MOVED=0
+      echo "Previous deployment restored after interrupted publication: $DESTINATION" >&2
     else
-      echo "Incomplete deployment preserved for resume: $STAGING" >&2
-      echo "Its Wine prefix is: $STAGING/Contents/SharedSupport/prefix" >&2
+      echo "ERROR: Interrupted publication left backup at: $BACKUP" >&2
     fi
   fi
-  for extracted in "$WRAPPER_EXTRACT" "$ENGINE_EXTRACT"; do
-    [[ -z "$extracted" || ! -e "$extracted" ]] || rm -rf "$extracted"
-  done
+  if [[ -n "$WORK_ROOT" && -e "$WORK_ROOT" ]]; then
+    if [[ -d "$WORK_ROOT" && ! -L "$WORK_ROOT" \
+          && "$WORK_ROOT" == /tmp/Pagonia-GPTK4b3-deployment.* \
+          && "$(stat -f '%u' "$WORK_ROOT")" == "$UID" ]]; then
+      if [[ $status -eq 0 && $SUCCESS -eq 1 ]]; then
+        rm -rf "$WORK_ROOT"
+      else
+        echo "Incomplete deployment preserved for resume: $WORK_ROOT" >&2
+        echo "Its Wine prefix is: $STAGING/Contents/SharedSupport/prefix" >&2
+      fi
+    else
+      echo "ERROR: Refusing to clean unexpected work path: $WORK_ROOT" >&2
+    fi
+  fi
   if [[ -n "$STEAM_SETUP_DOWNLOAD" && -e "$STEAM_SETUP_DOWNLOAD" ]]; then
     if [[ $status -eq 0 && $SUCCESS -eq 1 ]]; then
       rm -f "$STEAM_SETUP_DOWNLOAD"
@@ -279,10 +551,22 @@ on_signal() {
 trap cleanup EXIT
 trap on_signal INT TERM
 
+if [[ $EUID -eq 0 ]]; then
+  echo 'ERROR: Do not run this installer with sudo or as root.' >&2
+  exit 1
+fi
+DESTINATION=$(validate_destination "$DESTINATION")
+DESTINATION_PARENT=$(dirname "$DESTINATION")
+if [[ "$(stat -f '%d' /tmp)" != "$(stat -f '%d' "$DESTINATION_PARENT")" ]]; then
+  echo 'ERROR: Destination must be on the same filesystem as /tmp for atomic publication.' >&2
+  exit 1
+fi
+
 stop_if_running() {
-  if ps ax -o command= | grep -Eq '[S]team\.exe|[P]ioneers of Pagonia\.exe|[w]inedbg'; then
+  if "$PGREP_COMMAND" -u "$UID" -f 'Steam\.exe|Pioneers of Pagonia\.exe|winedbg' >/dev/null; then
     echo 'ERROR: Windows Steam or Pioneers of Pagonia is running. Exit it first.' >&2
-    ps ax -o pid=,command= | grep -E '[S]team\.exe|[P]ioneers of Pagonia\.exe|[w]inedbg' >&2 || true
+    ps -U "$UID" -o pid=,command= \
+      | grep -E '[S]team\.exe|[P]ioneers of Pagonia\.exe|[w]inedbg' >&2 || true
     exit 1
   fi
 }
@@ -316,36 +600,44 @@ stop_if_running
 
 # GPTK requires the user's Apple download. Wine and Wineskin are bundled next
 # to this script and must match the pinned archive hashes exactly.
-resolve_gptk_lib
+require_hash "$GPTK_HASH_MANIFEST" "$EXPECTED_GPTK_HASH_MANIFEST"
+require_hash "$GPTK_LINK_MANIFEST" "$EXPECTED_GPTK_LINK_MANIFEST"
 require_hash "$WRAPPER_ARCHIVE" "$EXPECTED_WRAPPER_ARCHIVE"
 require_hash "$ENGINE_ARCHIVE" "$EXPECTED_ENGINE_ARCHIVE"
-require_dir "$GPTK_LIB/external"
-require_dir "$GPTK_LIB/wine"
-require_hash "$GPTK_LIB/wine/x86_64-windows/dxgi.dll" "$EXPECTED_DXGI"
-require_hash "$GPTK_LIB/wine/x86_64-windows/d3d12.dll" "$EXPECTED_D3D12"
+verify_archive_layout "$WRAPPER_ARCHIVE" 'Wineskin-3.0.6-2.app' 300000000
+verify_archive_layout "$ENGINE_ARCHIVE" 'wswine.bundle' 900000000
+resolve_gptk_lib
+verify_gptk_lib "$GPTK_LIB"
 
 REUSE_PREFIX=0
-if [[ $FORCE_FRESH -eq 0 ]]; then
-  if [[ "$SOURCE_PREFIX" == 'auto' ]]; then
-    CANDIDATE="$HOME/Games/Pagonia-GPTK4b3"
+if [[ $FORCE_FRESH -eq 0 && -n "$SOURCE_PREFIX" ]]; then
+  SOURCE_PREFIX=$(python3 - "$SOURCE_PREFIX" <<'PY'
+from pathlib import Path
+import sys
+print(Path(sys.argv[1]).resolve(strict=True))
+PY
+)
+  validate_trusted_prefix_paths "$SOURCE_PREFIX"
+  validate_game "$SOURCE_PREFIX"
+  if [[ $ASSUME_YES -eq 1 ]] \
+     || yes_no "Trust and reuse the explicitly supplied prefix $SOURCE_PREFIX?" no; then
+    REUSE_PREFIX=1
   else
-    CANDIDATE="$SOURCE_PREFIX"
-  fi
-  if [[ -d "$CANDIDATE" ]] && validate_game "$CANDIDATE"; then
-    if yes_no "Reuse verified Pagonia prefix $CANDIDATE?" yes; then
-      REUSE_PREFIX=1
-      SOURCE_PREFIX="$CANDIDATE"
-    fi
-  elif [[ "$SOURCE_PREFIX" != 'auto' ]]; then
-    echo "ERROR: Requested source prefix is not a verified build: $SOURCE_PREFIX" >&2
-    exit 1
+    echo 'Cancelled.'
+    exit 0
   fi
 fi
 
 DEST_INITIAL_EXISTS=0
+DEST_INITIAL_DEVICE=''
 DEST_INITIAL_INODE=''
 if [[ -e "$DESTINATION" ]]; then
+  [[ ! -L "$DESTINATION" ]] || {
+    echo "ERROR: Destination must not be a symbolic link: $DESTINATION" >&2
+    exit 1
+  }
   DEST_INITIAL_EXISTS=1
+  DEST_INITIAL_DEVICE=$(stat -f '%d' "$DESTINATION")
   DEST_INITIAL_INODE=$(stat -f '%i' "$DESTINATION")
   if [[ $REPLACE -ne 1 ]]; then
     if yes_no "Back up and replace existing $DESTINATION?" no; then
@@ -374,18 +666,27 @@ if [[ $ASSUME_YES -ne 1 ]] && ! yes_no 'Continue?' no; then
   exit 0
 fi
 
-STAGING=$(mktemp -d '/tmp/Pagonia-GPTK4b3-deployment.XXXXXX.app')
-WRAPPER_EXTRACT=$(mktemp -d '/tmp/Pagonia-Wineskin.XXXXXX')
-ENGINE_EXTRACT=$(mktemp -d '/tmp/Pagonia-WineEngine.XXXXXX')
+WORK_ROOT=$(mktemp -d '/tmp/Pagonia-GPTK4b3-deployment.XXXXXX')
+chmod 700 "$WORK_ROOT"
+STAGING="$WORK_ROOT/Pioneers of Pagonia.app"
+mkdir -m 700 "$STAGING"
+INPUT_SNAPSHOT="$WORK_ROOT/verified-inputs"
+ENGINE_EXTRACT=$(mktemp -d "$WORK_ROOT/engine.XXXXXX")
+mkdir -m 700 "$INPUT_SNAPSHOT"
+cp -p "$WRAPPER_ARCHIVE" "$INPUT_SNAPSHOT/$WRAPPER_ARCHIVE_NAME"
+cp -p "$ENGINE_ARCHIVE" "$INPUT_SNAPSHOT/$ENGINE_ARCHIVE_NAME"
+require_hash "$INPUT_SNAPSHOT/$WRAPPER_ARCHIVE_NAME" "$EXPECTED_WRAPPER_ARCHIVE"
+require_hash "$INPUT_SNAPSHOT/$ENGINE_ARCHIVE_NAME" "$EXPECTED_ENGINE_ARCHIVE"
+verify_archive_layout "$INPUT_SNAPSHOT/$WRAPPER_ARCHIVE_NAME" \
+  'Wineskin-3.0.6-2.app' 300000000
+verify_archive_layout "$INPUT_SNAPSHOT/$ENGINE_ARCHIVE_NAME" \
+  'wswine.bundle' 900000000
 
 printf '%s\n' '1/7 Extracting the verified Wineskin and Wine runtime...'
-tar -xf "$WRAPPER_ARCHIVE" -C "$WRAPPER_EXTRACT"
-tar -xf "$ENGINE_ARCHIVE" -C "$ENGINE_EXTRACT"
-rm -rf "$STAGING"
-mv "$WRAPPER_EXTRACT/Wineskin-3.0.6-2.app" "$STAGING"
-rmdir "$WRAPPER_EXTRACT"
+tar -x --strip-components 1 -f "$INPUT_SNAPSHOT/$WRAPPER_ARCHIVE_NAME" -C "$STAGING"
+tar -xf "$INPUT_SNAPSHOT/$ENGINE_ARCHIVE_NAME" -C "$ENGINE_EXTRACT"
 ditto "$ENGINE_EXTRACT/wswine.bundle" "$STAGING/Contents/SharedSupport/wine"
-rm -rf "$ENGINE_EXTRACT"
+rm -rf "$ENGINE_EXTRACT" "$INPUT_SNAPSHOT"
 mv "$STAGING/Contents/SharedSupport/wine/bin/wine" \
   "$STAGING/Contents/SharedSupport/wine/bin/wine64"
 rm -rf "$STAGING/Contents/SharedSupport/prefix"
@@ -393,6 +694,10 @@ rm -rf "$STAGING/Contents/SharedSupport/prefix"
 printf '%s\n' '2/7 Creating the Wine prefix...'
 if [[ $REUSE_PREFIX -eq 1 ]]; then
   ditto "$SOURCE_PREFIX" "$STAGING/Contents/SharedSupport/prefix"
+  # Consume only the private snapshot after revalidating it. The live source
+  # prefix is never mutated or executed.
+  validate_trusted_prefix_paths "$STAGING/Contents/SharedSupport/prefix"
+  validate_game "$STAGING/Contents/SharedSupport/prefix"
 else
   mkdir -p "$STAGING/Contents/SharedSupport/prefix/drive_c"
 fi
@@ -429,20 +734,21 @@ ditto "$GPTK_LIB/wine" "$LIB/wine"
 
 if [[ $REUSE_PREFIX -eq 0 ]]; then
   printf '%s\n' '4/7 Installing official Windows Steam...'
-  STEAM_SETUP_DOWNLOAD=$(mktemp '/tmp/SteamSetup.XXXXXX.exe')
+  STEAM_SETUP_DOWNLOAD=$(mktemp '/tmp/PagoniaSteamSetup.XXXXXX')
   STEAM_SETUP="$PFX/drive_c/SteamSetup.exe"
   curl --fail --location --show-error \
+    --proto '=https' --proto-redir '=https' \
     --output "$STEAM_SETUP_DOWNLOAD" "$STEAM_INSTALLER_URL"
-  echo "Downloaded SteamSetup.exe SHA-256: $(sha256 "$STEAM_SETUP_DOWNLOAD")"
+  require_hash "$STEAM_SETUP_DOWNLOAD" "$EXPECTED_STEAM_SETUP"
   cp -p "$STEAM_SETUP_DOWNLOAD" "$STEAM_SETUP"
   plutil -replace 'Program Name and Path' -string '/SteamSetup.exe' "$PLIST"
   plutil -replace 'Program Flags' -string '/S' "$PLIST"
   rm -f "$APP/Contents/SharedSupport/Logs/LastRunWine.log"
-  open -n "$APP"
+  "$OPEN_COMMAND" -n "$APP"
   SETUP_SEEN=0
   SETUP_FINISHED=0
   for _ in $(jot 150); do
-    if ps ax -o command= | grep -q '[S]teamSetup.exe'; then
+    if "$PGREP_COMMAND" -u "$UID" -f 'SteamSetup\.exe' >/dev/null; then
       SETUP_SEEN=1
     elif [[ $SETUP_SEEN -eq 1 \
             && -f "$STEAM/steam.exe" \
@@ -450,7 +756,7 @@ if [[ $REUSE_PREFIX -eq 0 ]]; then
       SETUP_FINISHED=1
       break
     fi
-    sleep 2
+    "$SLEEP_COMMAND" 2
   done
   if [[ $SETUP_FINISHED -ne 1 ]]; then
     echo 'ERROR: SteamSetup did not complete cleanly within five minutes.' >&2
@@ -465,22 +771,26 @@ if [[ $REUSE_PREFIX -eq 0 ]]; then
   echo
   echo 'Steam is installed. It will now open for the interactive game install.'
   echo 'Sign in, install Pioneers of Pagonia (App 2155180), and let the download finish.'
-  open -n "$APP"
+  "$OPEN_COMMAND" -n "$APP"
   GAME_MANIFEST="$STEAM/steamapps/appmanifest_2155180.acf"
+  GAME_DOWNLOAD_COMPLETE=0
   for _ in $(jot 10800); do
     if [[ -f "$GAME_MANIFEST" ]]; then
-      STATE=$(awk -F'"' '/"StateFlags"/{print $4; exit}' "$GAME_MANIFEST")
-      BUILD=$(awk -F'"' '/"buildid"/{print $4; exit}' "$GAME_MANIFEST")
-      [[ "$STATE" == '4' && "$BUILD" == "$EXPECTED_BUILD_ID" ]] && break
+      STATE=$(awk -F'"' '/"StateFlags"/{print $4; exit}' "$GAME_MANIFEST" 2>/dev/null || true)
+      BUILD=$(awk -F'"' '/"buildid"/{print $4; exit}' "$GAME_MANIFEST" 2>/dev/null || true)
+      if [[ "$STATE" == '4' && "$BUILD" == "$EXPECTED_BUILD_ID" ]]; then
+        GAME_DOWNLOAD_COMPLETE=1
+        break
+      fi
     fi
-    sleep 2
+    "$SLEEP_COMMAND" 2
   done
-  if [[ ! -f "$GAME_MANIFEST" ]]; then
-    echo 'ERROR: Pagonia was not installed.' >&2
+  if [[ $GAME_DOWNLOAD_COMPLETE -ne 1 ]]; then
+    echo "ERROR: Pagonia download did not complete as build $EXPECTED_BUILD_ID." >&2
     exit 1
   fi
   WINEPREFIX="$PFX" "$WINE_ROOT/bin/wineserver" -k 2>/dev/null || true
-  sleep 5
+  "$SLEEP_COMMAND" 5
 fi
 
 printf '%s\n' '5/7 Verifying the installed game and configuring D3D12...'
@@ -705,24 +1015,44 @@ if [[ $DEST_INITIAL_EXISTS -eq 0 && -e "$DESTINATION" ]]; then
   echo 'ERROR: Destination appeared during deployment; refusing to replace it.' >&2
   exit 1
 fi
+PUBLISHED_DEVICE=$(stat -f '%d' "$STAGING")
+PUBLISHED_INODE=$(stat -f '%i' "$STAGING")
+# Defer interactive signals across the two-rename publication transaction so
+# cleanup always observes a complete, explicitly recorded state.
+trap '' INT TERM
 if [[ $DEST_INITIAL_EXISTS -eq 1 ]]; then
-  if [[ ! -e "$DESTINATION" || "$(stat -f '%i' "$DESTINATION")" != "$DEST_INITIAL_INODE" ]]; then
+  if ! same_identity "$DESTINATION" "$DEST_INITIAL_DEVICE" "$DEST_INITIAL_INODE"; then
+    trap on_signal INT TERM
     echo 'ERROR: Destination changed during deployment; refusing to publish.' >&2
     exit 1
   fi
-  BACKUP="${DESTINATION}.backup-$(date +%Y%m%d-%H%M%S)"
-  [[ ! -e "$BACKUP" ]] || { echo "ERROR: Backup exists: $BACKUP" >&2; exit 1; }
-  mv "$DESTINATION" "$BACKUP"
+  BACKUP=$(unique_sibling_path "$DESTINATION" backup)
+  atomic_rename_exclusive "$DESTINATION" "$BACKUP"
+  BACKUP_MOVED=1
 fi
-if ! mv "$STAGING" "$DESTINATION"; then
-  echo 'ERROR: Publishing failed; restoring the previous deployment.' >&2
-  if [[ -n "$BACKUP" && -e "$BACKUP" && ! -e "$DESTINATION" ]]; then
-    mv "$BACKUP" "$DESTINATION"
+if ! atomic_rename_exclusive "$STAGING" "$DESTINATION"; then
+  echo 'ERROR: Atomic publication failed; attempting to restore the previous deployment.' >&2
+  if [[ $BACKUP_MOVED -eq 1 && -e "$BACKUP" && ! -e "$DESTINATION" ]]; then
+    if atomic_rename_exclusive "$BACKUP" "$DESTINATION"; then
+      BACKUP_MOVED=0
+    else
+      echo "ERROR: Restore failed; previous deployment remains at: $BACKUP" >&2
+    fi
   fi
+  trap on_signal INT TERM
   exit 1
 fi
-STAGING=''
 PUBLISHED=1
+STAGING=''
+rmdir "$WORK_ROOT"
+WORK_ROOT=''
+if ! same_identity "$DESTINATION" "$PUBLISHED_DEVICE" "$PUBLISHED_INODE"; then
+  trap on_signal INT TERM
+  echo 'ERROR: Published application identity changed during publication.' >&2
+  exit 1
+fi
+BACKUP_MOVED=0
+trap on_signal INT TERM
 [[ -z "$BACKUP" ]] || echo "Previous deployment preserved pending launch verification: $BACKUP"
 LSREGISTER='/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister'
 if [[ -x "$LSREGISTER" ]]; then
@@ -740,7 +1070,11 @@ fi
 
 LOG="$DESTINATION/Contents/SharedSupport/Logs/LastRunWine.log"
 rm -f "$LOG"
-open -n "$DESTINATION"
+same_identity "$DESTINATION" "$PUBLISHED_DEVICE" "$PUBLISHED_INODE" || {
+  echo 'ERROR: Published application changed before launch.' >&2
+  exit 1
+}
+"$OPEN_COMMAND" -n "$DESTINATION"
 echo
 echo 'Pioneers of Pagonia is starting through its new application icon.'
 echo 'The installer is waiting up to fifteen minutes for the verified game launch.'
@@ -750,7 +1084,8 @@ GAME_COMMAND=''
 CLOUD_NOTICE_SHOWN=0
 STEAM_CONSOLE="$DESTINATION/Contents/SharedSupport/prefix/drive_c/Program Files (x86)/Steam/logs/console_log.txt"
 for _ in $(jot 450); do
-  GAME_COMMAND=$(ps ax -o command= | grep '[P]ioneers of Pagonia.exe' | head -1 || true)
+  GAME_COMMAND=$(ps -U "$UID" -o command= \
+    | grep '[P]ioneers of Pagonia.exe' | head -1 || true)
   [[ -n "$GAME_COMMAND" ]] && break
   if [[ $CLOUD_NOTICE_SHOWN -eq 0 && -f "$STEAM_CONSOLE" ]] \
      && tail -100 "$STEAM_CONSOLE" | grep -q 'SynchronizingCloud "syncfailed"'; then
@@ -760,7 +1095,7 @@ for _ in $(jot 450); do
     echo 'Bring the Windows Steam window forward and choose the correct save.'
     osascript -e 'tell application "System Events" to set frontmost of first process whose name is "wine64" to true' 2>/dev/null || true
   fi
-  sleep 2
+  "$SLEEP_COMMAND" 2
 done
 if [[ -z "$GAME_COMMAND" ]]; then
   echo 'ERROR: Pioneers of Pagonia did not start within fifteen minutes.' >&2
@@ -785,7 +1120,7 @@ for _ in $(jot 90); do
     SUCCESS=1
     exit 0
   fi
-  sleep 2
+  "$SLEEP_COMMAND" 2
 done
 
 echo 'ERROR: Game started, but D3D12 device/swapchain creation was not logged.' >&2

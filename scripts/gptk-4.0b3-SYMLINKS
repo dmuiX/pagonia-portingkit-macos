@@ -1,0 +1,10 @@
+external/D3DMetal.framework/D3DMetal	Versions/Current/D3DMetal
+external/D3DMetal.framework/Resources	Versions/Current/Resources
+external/D3DMetal.framework/Versions/Current	A
+wine/x86_64-unix/d3d10.so	../../external/libd3dshared.dylib
+wine/x86_64-unix/d3d11.so	../../external/libd3dshared.dylib
+wine/x86_64-unix/d3d12.so	../../external/libd3dshared.dylib
+wine/x86_64-unix/d3d12core.so	../../external/libd3dshared.dylib
+wine/x86_64-unix/dxgi.so	../../external/libd3dshared.dylib
+wine/x86_64-unix/nvapi64.so	../../external/libd3dshared.dylib
+wine/x86_64-unix/nvngx-on-metalfx.so	../../external/libd3dshared.dylib

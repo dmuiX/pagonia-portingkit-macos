@@ -50,9 +50,11 @@ Mount the GPTK 4.0 beta 3 DMG or leave it in `~/Downloads`, then run:
 ./scripts/install-pagonia-gptk4b3.sh
 ```
 
-The script can reuse a verified local Pagonia prefix when available. Otherwise,
-it installs Windows Steam and waits for you to sign in and install the game.
-Steam Cloud conflicts are never resolved automatically.
+Fresh installation is the default. The script installs the pinned Windows
+Steam installer and waits for you to sign in and install the game. A local
+Pagonia prefix is reused only when explicitly supplied with `--source-prefix`;
+only use a prefix you created and trust. Steam Cloud conflicts are never
+resolved automatically.
 
 The completed application is installed as:
 
@@ -63,7 +65,9 @@ The completed application is installed as:
 ## Runtime integrity
 
 The installer verifies all runtime archives and important binaries before
-publishing the application.
+publishing the application. It also verifies the complete GPTK 4.0 beta 3 file
+and symlink manifests, rejects additions, requires a read-only mounted source,
+and validates every native GPTK executable against Apple's signing anchor.
 
 ```text
 0598a60af56d67b1efd35ac0751cbcc34a30a0329e2788e182dd67a5698f9353  scripts/WS12WineSikarugir10.0_2-20251028-pagonia.tar.xz
@@ -71,7 +75,23 @@ dc97a4ff0f75b74a62b8571d4fe56387648f3755169e1dd8186b8f3d39aa597b  scripts/Winesk
 ```
 
 The Wine archive contains its LGPL 2.1 license and source-provenance notice. It
-contains no game files and no Apple GPTK or D3DMetal components.
+contains no game files and no Apple GPTK or D3DMetal components. Detailed
+provenance and limitations are documented in
+[`scripts/RUNTIME-PROVENANCE.md`](scripts/RUNTIME-PROVENANCE.md).
+
+## Tests
+
+The non-human fresh-install packaging/control-flow smoke test can be run with a
+trusted local fixture prefix:
+
+```bash
+./tests/simulate-installer.sh
+```
+
+This exercises the SteamSetup lifecycle, completed-login fixture state, depot
+completion fixture, configuration, verification, and atomic publication. It
+cannot validate SteamSetup's real output and cannot replace a real
+Steam authentication, Steam Guard, account-license, or network-depot test.
 
 ## Important limitations
 

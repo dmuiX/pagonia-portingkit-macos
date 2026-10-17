@@ -90,6 +90,10 @@ def verify_archive(path: Path, max_expanded_size: int) -> int:
             member_path = safe_archive_name(member)
             if member_path in members:
                 raise ValueError(f"Duplicate archive path: {member_path}")
+            if not member.isdir() and any(
+                member_path in previous.parents for previous in members
+            ):
+                raise ValueError(f"Archive replaces an existing parent directory: {member_path}")
             if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
                 raise ValueError(f"Unsafe archive entry type: {member_path}")
             for parent in member_path.parents:

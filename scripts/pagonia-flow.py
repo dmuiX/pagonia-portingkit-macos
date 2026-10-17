@@ -86,8 +86,18 @@ def downloader(stage: Path, complete: bool) -> Path:
     transfer = load("pagonia-steam-transfer.py")
     ownership = load("pagonia-ownership.py")
     app = stage / "Steam Downloader.app"
-    if app.exists():
+    if app.exists() or app.is_symlink():
         ownership.stop_orphans(stage)
+        if app.is_symlink() or not app.is_dir() or app.lstat().st_uid != os.getuid():
+            raise ValueError("Unsafe retained downloader app")
+        existing_prefix = app / "Contents/SharedSupport/prefix"
+        if not existing_prefix.is_dir() or existing_prefix.is_symlink():
+            if existing_prefix.is_symlink():
+                raise ValueError("Linked retained downloader prefix")
+            if complete:
+                raise ValueError("Completed staging is missing its downloader")
+            print("  Rebuilding interrupted downloader wrapper from pinned inputs...", flush=True)
+            shutil.rmtree(app)
     if complete:
         prefix = app / "Contents/SharedSupport/prefix"
         steam = transfer.steam_folder(prefix)

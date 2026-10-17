@@ -69,7 +69,10 @@ def verify_gameplay(app: Path, prefix: Path, wine: Path, gptk: Path) -> None:
     }
     for file, digest in required.items():
         if file.is_symlink():
-            raise ValueError(f"Linked critical application file: {file}")
+            # Pinned Wine archives may contain internal executable symlinks.
+            resolved = file.resolve(strict=True)
+            if wine.resolve(strict=True) not in resolved.parents or wine not in file.parents:
+                raise ValueError(f"External or untrusted critical file symlink: {file}")
         graphics.verify_digest(file, digest)
     game = prefix / f"drive_c/Program Files (x86)/Steam/steamapps/common/{GAME}"
     if (game / "D3D12Core.dll").exists():

@@ -25,5 +25,7 @@ jobs:
         run: |
           python3 -m unittest discover -s tests -p 'test-new-installer.py' -v
           python3 -m unittest discover -s tests -p 'test-pagonia-process.py' -v
+      - name: Graphics configuration tests
+        run: python3 -m unittest discover -s tests -p 'test-new-graphics.py' -v
       - name: Patch whitespace
         run: git diff --check HEAD~1 HEAD

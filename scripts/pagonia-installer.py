@@ -108,7 +108,8 @@ def main() -> int:
         remove_managed(args.yes)
         return 0
     if args.fresh:
-        remove_managed(args.yes)
+        # Never delete an installation before the replacement can be deployed.
+        # Incomplete development builds must be non-destructive.
         mode, path = "fresh", None
     else:
         mode, path = choose_state(args.resume)

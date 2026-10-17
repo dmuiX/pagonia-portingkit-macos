@@ -161,7 +161,7 @@ def locate_gptk(explicit: Path | None = None) -> Path:
     downloads = Path.home() / "Downloads"
     for dmg in sorted(downloads.glob("*.dmg"), key=lambda p: p.stat().st_mtime, reverse=True):
         normalized = re.sub(r"[^a-z0-9]+", " ", dmg.name.lower())
-        if ("game porting toolkit" in normalized or "evaluation environment for windows games" in normalized) and re.search(r"\\b4(?: 0)? beta 3\\b", normalized):
+        if ("game porting toolkit" in normalized or "evaluation environment for windows games" in normalized) and re.search(r"(?:^| )4(?: 0)? beta 3(?: |$)", normalized):
             subprocess.run(["/usr/sbin/diskutil", "image", "attach", "--nobrowse",
                             "--readOnly", str(dmg)], check=True, timeout=120)
             for path in sorted(Path("/Volumes").glob("*/redist/lib")):

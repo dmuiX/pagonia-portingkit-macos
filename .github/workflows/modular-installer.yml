@@ -25,6 +25,7 @@ jobs:
           python3 tests/test-new-installer.py
           python3 tests/test-pagonia-process.py
           python3 tests/test-new-graphics.py
+          python3 tests/test-new-flow.py
       - name: Existing component regression tests
         run: |
           for test in tests/test-*.py; do

@@ -169,6 +169,9 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
+    except KeyboardInterrupt:
+        print("Interrupted; validated Resume staging is preserved.", file=sys.stderr)
+        raise SystemExit(130)
     except (RuntimeError, OSError, ValueError, subprocess.CalledProcessError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         raise SystemExit(1)

@@ -101,16 +101,18 @@ def downloader(stage: Path, complete: bool) -> Path:
     if complete:
         prefix = app / "Contents/SharedSupport/prefix"
         steam = transfer.steam_folder(prefix)
-        print("  Revalidating completed Pagonia depot; no Steam login needed...", flush=True)
+        print("Deployment 1/6: Reusing the validated Wine 11.17 downloader...", flush=True)
+        print("Deployment 2/6: Skipping Steam login and download for completed Resume...", flush=True)
+        print("Deployment 3/6: Revalidating the stopped Pagonia depot...", flush=True)
         transfer.command("pagonia-depot.py", "validate", steam, *transfer.DEPOT_OPTIONS)
         return prefix
 
     if not app.exists():
-        print("  Creating Wine 11.17 downloader...", flush=True)
+        print("Deployment 1/6: Creating the Wine 11.17 downloader...", flush=True)
         app, prefix, wine = runtime.build_app(stage, "downloader")
         fresh = True
     else:
-        print("  Validating and refreshing an incomplete downloader...", flush=True)
+        print("Deployment 1/6: Validating the retained Wine 11.17 downloader...", flush=True)
         runtime.refresh_downloader(stage)
         prefix = app / "Contents/SharedSupport/prefix"
         wine = app / "Contents/SharedSupport/wine"
@@ -124,7 +126,9 @@ def downloader(stage: Path, complete: bool) -> Path:
         or service.is_symlink()
     )
     setup = pin_steam_setup(stage) if needs_setup else None
+    print("Deployment 2/6: Authenticating Steam and acquiring Pagonia...", flush=True)
     download.acquire(app, prefix, wine, fresh=fresh, setup=setup)
+    print("Deployment 3/6: Validating the stopped 856-file Pagonia depot...", flush=True)
     mark_depot_complete(stage)
     return prefix
 
@@ -231,15 +235,17 @@ def deploy(
         if not complete and not preflight_done:
             preflight.verify_inputs()
         source = downloader(stage, complete)
-        print("  Constructing Wine 10 gameplay app...", flush=True)
+        print("Deployment 4/6: Constructing the isolated Wine 10 gameplay app...", flush=True)
         clear_non_durable_build(stage)
         gameplay = load("pagonia-gameplay.py")
         app = gameplay.build(stage, source, gptk)
+        print("Deployment 5/6: Validating and atomically publishing the application...", flush=True)
         publication.mark_application(app)
         backup = publication.publish(
             app, expected_destination_identity=destination_identity
         )
         try:
+            print("Deployment 6/6: Running real D3D12 and terrain acceptance...", flush=True)
             acceptance(DESTINATION)
         except BaseException:
             # Do not move a still-running Wineskin game during rollback.

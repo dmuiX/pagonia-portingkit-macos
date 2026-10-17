@@ -103,6 +103,7 @@ def choose_state(resume: str | None) -> tuple[str, str | None]:
 
     def validate(value: str) -> None:
         candidate = Path(value)
+        print(f"  Validating Resume candidate: {candidate}", flush=True)
         if not candidate.is_absolute() or candidate.parent != PARENT:
             raise RuntimeError("--resume must name a direct child of /private/tmp")
         helper(STATE, "highest", "--parent", str(PARENT), "--path", value,
@@ -198,6 +199,7 @@ def main() -> int:
             reject_unmanaged_destination(inventory())
             mode, path = "fresh", None
         else:
+            print("State selection: Discovering managed Fresh/Resume state...", flush=True)
             mode, path = choose_state(arguments.resume)
         print(f"Deployment mode: {mode}", flush=True)
         if path:
@@ -220,6 +222,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("Interrupted; validated Resume staging is preserved.", file=sys.stderr)
         raise SystemExit(130)
-    except (RuntimeError, OSError, ValueError, subprocess.CalledProcessError) as exc:
+    except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         raise SystemExit(1)

@@ -34,8 +34,9 @@ def install_steam(app: Path, prefix: Path, wine: Path, setup: Path) -> None:
     child = proc.start_wine(prefix, wine, str(destination), ["/S"], log,
                             downloader=True)
     print("  Waiting for SteamSetup.exe to finish...", flush=True)
-    deadline = time.monotonic() + 300
-    last_status = time.monotonic()
+    started = time.monotonic()
+    deadline = started + 300
+    last_status = started
     try:
         while time.monotonic() < deadline:
             active = subprocess.run(["/usr/bin/pgrep", "-u", str(__import__("os").getuid()),
@@ -48,7 +49,11 @@ def install_steam(app: Path, prefix: Path, wine: Path, setup: Path) -> None:
             if child.poll() is not None and child.returncode not in (None, 0):
                 raise RuntimeError("SteamSetup exited unsuccessfully")
             if time.monotonic() - last_status >= 25:
-                print("  Still waiting for SteamSetup completion...", flush=True)
+                print(
+                    f"  Still waiting for SteamSetup completion "
+                    f"({int(time.monotonic() - started)} elapsed seconds)...",
+                    flush=True,
+                )
                 last_status = time.monotonic()
             time.sleep(2)
         else:
@@ -82,8 +87,9 @@ def wait_for_login(steam: Path, timeout: int = 1800) -> None:
     login_log = steam / "logs/steamui_login.txt"
     print("ACTION REQUIRED: Sign in to Steam and complete Steam Guard or QR confirmation.",
           flush=True)
-    deadline = time.monotonic() + timeout
-    last = time.monotonic()
+    started = time.monotonic()
+    deadline = started + timeout
+    last = started
     while time.monotonic() < deadline:
         if loginusers.is_file() and not loginusers.is_symlink() and login_log.is_file():
             text = login_log.read_text(errors="replace")
@@ -94,7 +100,11 @@ def wait_for_login(steam: Path, timeout: int = 1800) -> None:
                 except (OSError, ValueError):
                     pass
         if time.monotonic() - last >= 25:
-            print("  Waiting for persisted Steam authentication...", flush=True)
+            print(
+                f"  Waiting for persisted Steam authentication "
+                f"({int(time.monotonic() - started)} elapsed seconds)...",
+                flush=True,
+            )
             last = time.monotonic()
         time.sleep(2)
     raise TimeoutError("Steam login did not complete within 30 minutes")
@@ -113,8 +123,9 @@ def install_request(prefix: Path, wine: Path, steam: Path, log: Path) -> None:
 
 def wait_for_depot(steam: Path, timeout: int = 21600) -> None:
     transfer = load("pagonia-steam-transfer.py")
-    deadline = time.monotonic() + timeout
-    last = time.monotonic()
+    started = time.monotonic()
+    deadline = started + timeout
+    last = started
     while time.monotonic() < deadline:
         status = subprocess.run(
             [sys.executable, str(ROOT / "pagonia-depot.py"), "status",
@@ -128,7 +139,11 @@ def wait_for_depot(steam: Path, timeout: int = 21600) -> None:
             )
             return
         if time.monotonic() - last >= 25:
-            print("  Waiting for approved Pagonia build 25784167...", flush=True)
+            print(
+                f"  Waiting for approved Pagonia build 25784167 "
+                f"({int(time.monotonic() - started)} elapsed seconds)...",
+                flush=True,
+            )
             last = time.monotonic()
         time.sleep(2)
     raise TimeoutError("Pagonia depot download did not complete")
@@ -164,7 +179,10 @@ def start_visible_steam(app: Path, prefix: Path, wine: Path, steam: Path,
     for attempt in (1, 2):
         for name in ("steamui_login.txt", "steamui_html.txt"):
             (steam / "logs" / name).unlink(missing_ok=True)
-        print(f"  Starting Steam UI (retry {attempt - 1}/1)...", flush=True)
+        if attempt == 1:
+            print("  Starting the GPU-accelerated Steam UI with Wine 11.17...", flush=True)
+        else:
+            print("  Retrying the Steam UI after controlled CEF cache cleanup...", flush=True)
         child = process.start_wine(prefix, wine, str(steam / "steam.exe"),
                                    ["-no-cef-sandbox", "-vgui"],
                                    logs / "SteamUI.log", downloader=True)

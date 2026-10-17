@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 import re
 import stat
 import tarfile
+import time
 
 BUFFER_SIZE = 1024 * 1024
 
@@ -85,8 +86,20 @@ def verify_archive(path: Path, max_expanded_size: int) -> int:
     members: dict[PurePosixPath, tarfile.TarInfo] = {}
     links: list[tuple[tarfile.TarInfo, PurePosixPath]] = []
     expanded_size = 0
+    entries_seen = 0
+    started = time.monotonic()
+    last_status = started
     with tarfile.open(path, mode="r:*") as archive:
         for member in archive:
+            entries_seen += 1
+            now = time.monotonic()
+            if now - last_status >= 25:
+                print(
+                    f"    Still verifying archive layout: {entries_seen} entries, "
+                    f"{int(now - started)} elapsed seconds...",
+                    flush=True,
+                )
+                last_status = now
             member_path = safe_archive_name(member)
             if member_path in members:
                 raise ValueError(f"Duplicate archive path: {member_path}")

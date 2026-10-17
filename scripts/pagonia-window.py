@@ -58,8 +58,13 @@ def wait_for_window(steam_root: Path, timeout: int = 180) -> None:
     if permission.returncode:
         raise RuntimeError("Terminal needs Screen Recording permission for Steam UI verification")
     log = steam_root / "logs/steamui_html.txt"
-    deadline = time.monotonic() + timeout
-    last_status = time.monotonic()
+    started = time.monotonic()
+    deadline = started + timeout
+    last_status = started
+    print(
+        "  Steam may need a while to create its first GPU-rendered window; monitoring it now...",
+        flush=True,
+    )
     while time.monotonic() < deadline:
         if log.exists() and "Timed out waiting for webhelper init" in log.read_text(errors="replace"):
             raise RuntimeError("Steam webhelper timed out")
@@ -67,7 +72,11 @@ def wait_for_window(steam_root: Path, timeout: int = 180) -> None:
             print("  Steam UI is visibly rendered.", flush=True)
             return
         if time.monotonic() - last_status >= 25:
-            print("  Waiting for visible Steam login window...", flush=True)
+            print(
+                f"  Waiting for visible Steam login window "
+                f"({int(time.monotonic() - started)} elapsed seconds)...",
+                flush=True,
+            )
             last_status = time.monotonic()
         time.sleep(2)
     raise TimeoutError("Steam login window was not visibly rendered")

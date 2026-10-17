@@ -147,13 +147,24 @@ def verify_screen_recording() -> None:
 
 
 def preflight(gptk_lib: Path) -> None:
+    print("Pagonia installer preflight:", flush=True)
+    print("  1/7 Verifying pinned files and SHA-256 identities...", flush=True)
     verify_inputs()
-    verify_archives()
+    print("  2/7 Verifying the Wineskin wrapper archive layout...", flush=True)
+    verify_archive("Wineskin-3.0.6-2.app.tar.xz", 300000000)
+    print("  3/7 Verifying the Wine 10 gameplay archive layout...", flush=True)
+    verify_archive("WS12WineSikarugir10.0_2-20251028-pagonia.tar.xz", 900000000)
+    print("  4/7 Verifying the Wine 11.17 downloader archive layout...", flush=True)
+    verify_archive("WineCX-11.17-SteamDownloader-4.7.3.tar.xz", 1500000000)
+    print("  5/7 Checking publication filesystem and destination safety...", flush=True)
     verify_same_filesystem()
     verify_destination(Path("/Applications/Pioneers of Pagonia.app"))
+    print("  6/7 Checking Screen Recording permission...", flush=True)
     verify_screen_recording()
+    print("  7/7 Verifying every GPTK file, symlink, and Apple signature...", flush=True)
     verify_gptk_files(gptk_lib, ROOT / "gptk-4.0b3-SHA256SUMS",
                       ROOT / "gptk-4.0b3-SYMLINKS")
+    print("Preflight verification complete.", flush=True)
     return None
 
 
@@ -194,20 +205,23 @@ def locate_gptk(explicit: Path | None = None) -> Path:
     raise ValueError("GPTK 4.0 beta 3 is not mounted and its DMG was not found in Downloads")
 
 
+def verify_archive(name: str, maximum: int) -> None:
+    import sys
+    subprocess.run(
+        [sys.executable, str(ROOT / "pagonia-inputs.py"), "verify-archive",
+         str(ROOT / name), "--max-expanded-size", str(maximum)],
+        check=True, timeout=900,
+    )
+
+
 def verify_archives() -> None:
     """Fresh preflight validates every pinned runtime archive's complete layout."""
-    import sys
-    sizes = (
+    for name, maximum in (
         ("Wineskin-3.0.6-2.app.tar.xz", 300000000),
         ("WS12WineSikarugir10.0_2-20251028-pagonia.tar.xz", 900000000),
         ("WineCX-11.17-SteamDownloader-4.7.3.tar.xz", 1500000000),
-    )
-    for name, maximum in sizes:
-        subprocess.run(
-            [sys.executable, str(ROOT / "pagonia-inputs.py"), "verify-archive",
-             str(ROOT / name), "--max-expanded-size", str(maximum)],
-            check=True, timeout=180,
-        )
+    ):
+        verify_archive(name, maximum)
 
 
 def verify_same_filesystem() -> None:

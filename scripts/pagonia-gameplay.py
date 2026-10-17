@@ -108,9 +108,10 @@ def build(staging: Path, downloader_prefix: Path, gptk: Path):
     process.stop_prefix(prefix, wine, log)
 
     # Both snapshots are created from the stopped and validated downloader.
+    print("  Creating disjoint clean-client and authenticated-session snapshots...", flush=True)
     session, client = transfer.session_and_client(downloader_prefix, staging)
     try:
-        print("  Importing the disjoint clean-client and session snapshots...", flush=True)
+        print("  Installing Steam client, session, and validated depot into Wine 10...", flush=True)
         steam_id = transfer.transfer(downloader_prefix, prefix, session, client)
     finally:
         if client.exists():
@@ -120,7 +121,7 @@ def build(staging: Path, downloader_prefix: Path, gptk: Path):
 
     steam = transfer.steam_folder(prefix)
     config.launch_options(steam, steam_id)
-    print("  Verifying GPTK before consuming its immutable files...", flush=True)
+    print("  Verifying every GPTK file before installing D3DMetal...", flush=True)
     preflight = load("pagonia-preflight.py")
     preflight.verify_gptk_files(gptk, ROOT / "gptk-4.0b3-SHA256SUMS",
                                 ROOT / "gptk-4.0b3-SYMLINKS")

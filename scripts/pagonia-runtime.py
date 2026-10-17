@@ -24,6 +24,12 @@ def verified_extract(key, parent):
     spec.loader.exec_module(module)
     PINS=module.PINS
     filename, maximum, dirname=ARCHIVES[key]
+    labels = {
+        "wrapper": "Wineskin wrapper",
+        "downloader": "Wine 11.17 downloader runtime",
+        "gameplay": "Wine 10 gameplay runtime",
+    }
+    print(f"  Snapshotting and extracting the verified {labels[key]}...", flush=True)
     archive=ROOT/filename
     source_fd=os.open(archive,os.O_RDONLY|os.O_NOFOLLOW)
     snapshot_fd,snapshot_name=tempfile.mkstemp(prefix="archive-",suffix=".tar.xz",dir=parent)

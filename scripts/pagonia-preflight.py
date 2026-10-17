@@ -144,6 +144,8 @@ def verify_screen_recording() -> None:
 
 def preflight(gptk_lib: Path) -> None:
     verify_inputs()
+    verify_archives()
+    verify_same_filesystem()
     verify_destination(Path("/Applications/Pioneers of Pagonia.app"))
     verify_screen_recording()
     verify_gptk_files(gptk_lib, ROOT / "gptk-4.0b3-SHA256SUMS",
@@ -169,3 +171,26 @@ def locate_gptk(explicit: Path | None = None) -> Path:
                     return path
             raise ValueError("Mounted GPTK image has no expected redist/lib")
     raise ValueError("GPTK 4.0 beta 3 is not mounted and its DMG was not found in Downloads")
+
+
+def verify_archives() -> None:
+    """Fresh preflight validates every pinned runtime archive's complete layout."""
+    import sys
+    sizes = (
+        ("Wineskin-3.0.6-2.app.tar.xz", 300000000),
+        ("WS12WineSikarugir10.0_2-20251028-pagonia.tar.xz", 900000000),
+        ("WineCX-11.17-SteamDownloader-4.7.3.tar.xz", 1500000000),
+    )
+    for name, maximum in sizes:
+        subprocess.run(
+            [sys.executable, str(ROOT / "pagonia-inputs.py"), "verify-archive",
+             str(ROOT / name), "--max-expanded-size", str(maximum)],
+            check=True, timeout=180,
+        )
+
+
+def verify_same_filesystem() -> None:
+    source = Path("/private/tmp")
+    target = Path("/Applications")
+    if source.stat().st_dev != target.stat().st_dev:
+        raise ValueError("Staging and /Applications must share a filesystem")

@@ -51,8 +51,11 @@ def validate_parent(value: str) -> Path:
         fail(f"Cannot inspect parent {parent}: {error}")
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
         fail(f"Parent must be a non-symlink directory: {parent}")
-    if not owner_controlled(parent):
-        fail(f"Parent must be owner-controlled by uid {os.getuid()}: {parent}")
+    trusted_tmp = (parent == Path("/private/tmp") and metadata.st_uid == 0
+                   and bool(metadata.st_mode & stat.S_ISVTX)
+                   and stat.S_IMODE(metadata.st_mode) == 0o1777)
+    if not (trusted_tmp or owner_controlled(parent)):
+        fail(f"Parent must be owner-controlled or system sticky /private/tmp: {parent}")
     return parent
 
 

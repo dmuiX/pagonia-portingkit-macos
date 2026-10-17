@@ -83,6 +83,17 @@ def parse_keyvalues(text: str) -> dict[str, object]:
     return parsed
 
 
+def resolve_owned_directory(path: Path, description: str) -> Path:
+    info = path.lstat()
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != os.getuid()
+    ):
+        raise ValueError(f"{description} is not an owned, unlinked directory: {path}")
+    return path.resolve(strict=True)
+
+
 def require_unlinked_path(root: Path, path: Path) -> None:
     try:
         relative = path.relative_to(root)
@@ -140,28 +151,73 @@ def safe_files(root: Path) -> list[Path]:
     return files
 
 
-def create_snapshot(steam: Path, snapshot: Path) -> None:
-    steam = steam.resolve(strict=True)
-    if snapshot.exists():
-        raise ValueError(f"Steam session snapshot already exists: {snapshot}")
+def transferable_steam_id(steam: Path) -> str:
+    """Validate that Steam persisted the allowlisted state needed for transfer."""
+    steam = resolve_owned_directory(steam, "Steam root")
     config = steam / "config"
     loginusers = config / "loginusers.vdf"
     config_vdf = config / "config.vdf"
     for required in (loginusers, config_vdf):
         require_unlinked_path(steam, required)
         info = required.lstat()
-        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
-            raise ValueError(f"Missing Steam login file: {required}")
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_nlink != 1
+            or info.st_mode & 0o022
+            or info.st_size > MAX_FILE_SIZE
+        ):
+            raise ValueError(f"Unsafe Steam login file: {required}")
     steam_id = authenticated_steam_id(loginusers)
     account_id = str(int(steam_id) - STEAM_ID_BASE)
-    user_config = steam / "userdata" / account_id / "config"
-    localconfig = user_config / "localconfig.vdf"
+    localconfig = steam / "userdata" / account_id / "config/localconfig.vdf"
     require_unlinked_path(steam, localconfig)
-    if not localconfig.is_file() or localconfig.is_symlink():
-        raise ValueError(f"Missing Steam account localconfig: {localconfig}")
+    local_info = localconfig.lstat()
+    if (
+        not stat.S_ISREG(local_info.st_mode)
+        or stat.S_ISLNK(local_info.st_mode)
+        or local_info.st_uid != os.getuid()
+        or local_info.st_nlink != 1
+        or local_info.st_mode & 0o022
+        or local_info.st_size > MAX_FILE_SIZE
+    ):
+        raise ValueError(f"Unsafe Steam account localconfig: {localconfig}")
     localconfig_data = localconfig.read_bytes()
     if not all(marker in localconfig_data for marker in (b'"AuthData"', b'"SharedAuth"')):
         raise ValueError("Steam localconfig has no persisted authentication data")
+    optional = config / "SteamAppData.vdf"
+    candidates = [optional] if optional.exists() or optional.is_symlink() else []
+    candidates.extend(
+        entry
+        for entry in steam.iterdir()
+        if re.fullmatch(r"ssfn\d+", entry.name, flags=re.IGNORECASE)
+    )
+    for candidate in candidates:
+        require_unlinked_path(steam, candidate)
+        info = candidate.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_nlink != 1
+            or info.st_mode & 0o022
+            or info.st_size > MAX_FILE_SIZE
+        ):
+            raise ValueError(f"Unsafe optional Steam login file: {candidate}")
+    return steam_id
+
+
+def create_snapshot(steam: Path, snapshot: Path) -> None:
+    steam = resolve_owned_directory(steam, "Steam root")
+    if snapshot.exists():
+        raise ValueError(f"Steam session snapshot already exists: {snapshot}")
+    steam_id = transferable_steam_id(steam)
+    account_id = str(int(steam_id) - STEAM_ID_BASE)
+    config = steam / "config"
+    loginusers = config / "loginusers.vdf"
+    config_vdf = config / "config.vdf"
+    localconfig = steam / "userdata" / account_id / "config/localconfig.vdf"
 
     snapshot.mkdir(mode=0o700)
     selected = [loginusers, config_vdf, localconfig]
@@ -240,7 +296,7 @@ def read_manifest(root: Path) -> dict[Path, str]:
 
 
 def validate_snapshot(root: Path, *, exact: bool) -> str:
-    root = root.resolve(strict=True)
+    root = resolve_owned_directory(root, "Steam session snapshot")
     expected = read_manifest(root)
     actual: set[Path] = set()
     for relative, digest in expected.items():
@@ -282,8 +338,8 @@ def validate_snapshot(root: Path, *, exact: bool) -> str:
 
 
 def install_snapshot(snapshot: Path, steam: Path) -> str:
-    snapshot = snapshot.resolve(strict=True)
-    steam = steam.resolve(strict=True)
+    snapshot = resolve_owned_directory(snapshot, "Steam session snapshot")
+    steam = resolve_owned_directory(steam, "Steam destination")
     steam_id = validate_snapshot(snapshot, exact=True)
     expected = read_manifest(snapshot)
     for relative in sorted(expected, key=lambda path: path.as_posix()):
@@ -355,8 +411,8 @@ def parse_client_inventory(steam: Path) -> dict[Path, tuple[int, int]]:
             raise ValueError("Steam client snapshot exceeds size limit")
         key = relative.as_posix().lower()
         candidate = (relative, size, crc)
-        if key in entries and entries[key] != candidate:
-            raise ValueError(f"Conflicting Steam package entries: {windows_name}")
+        if key in entries:
+            raise ValueError(f"Duplicate Steam package entry: {windows_name}")
         entries[key] = candidate
     parsed = {relative: (size, crc) for relative, size, crc in entries.values()}
     if Path("steam.exe") not in parsed:
@@ -391,7 +447,7 @@ def read_client_snapshot_manifest(root: Path) -> dict[Path, str]:
 
 
 def validate_client_snapshot(root: Path) -> None:
-    root = root.resolve(strict=True)
+    root = resolve_owned_directory(root, "Steam client snapshot")
     expected = read_client_snapshot_manifest(root)
     actual: set[Path] = set()
     allowed_directories = {
@@ -422,7 +478,7 @@ def validate_client_snapshot(root: Path) -> None:
 
 
 def create_client_snapshot(steam: Path, snapshot: Path) -> None:
-    steam = steam.resolve(strict=True)
+    steam = resolve_owned_directory(steam, "Steam root")
     if snapshot.exists() or snapshot.is_symlink():
         raise ValueError(f"Steam client snapshot already exists: {snapshot}")
     entries = parse_client_inventory(steam)
@@ -472,8 +528,8 @@ def create_client_snapshot(steam: Path, snapshot: Path) -> None:
 
 
 def install_client_snapshot(snapshot: Path, steam: Path) -> None:
-    snapshot = snapshot.resolve(strict=True)
-    steam = steam.resolve(strict=True)
+    snapshot = resolve_owned_directory(snapshot, "Steam client snapshot")
+    steam = resolve_owned_directory(steam, "Steam destination")
     validate_client_snapshot(snapshot)
     expected = read_client_snapshot_manifest(snapshot)
     for relative in sorted(expected, key=lambda path: path.as_posix()):

@@ -102,6 +102,39 @@ class ManagedStateTests(unittest.TestCase):
                 },
             )
 
+    def test_list_and_delete_include_verified_publication_backups_and_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            sandbox = Path(temporary)
+            destination = sandbox / "Pioneers of Pagonia.app"
+            staging_parent = sandbox / "staging"
+            staging_parent.mkdir()
+            backup = sandbox / "Pioneers of Pagonia.app.backup-abc123"
+            failed = sandbox / "Pioneers of Pagonia.app.failed-def456"
+            unverified = sandbox / "Pioneers of Pagonia.app.failed-personal"
+            make_installation(backup)
+            make_installation(failed)
+            unverified.mkdir()
+
+            listed, payload = run_helper("list", destination, staging_parent)
+            self.assertEqual(listed.returncode, 0, listed.stderr)
+            self.assertEqual(
+                payload["managed"],
+                [
+                    {"kind": "managed-installation", "path": str(backup)},
+                    {"kind": "managed-installation", "path": str(failed)},
+                ],
+            )
+            self.assertEqual(
+                payload["unverified"],
+                [{"path": str(unverified), "reason": "broad-name-match"}],
+            )
+
+            deleted, payload = run_helper("delete", destination, staging_parent)
+            self.assertEqual(deleted.returncode, 0, deleted.stderr)
+            self.assertFalse(backup.exists())
+            self.assertFalse(failed.exists())
+            self.assertTrue(unverified.exists())
+
     def test_strict_markers_and_structure_are_not_managed_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             sandbox = Path(temporary)
@@ -214,27 +247,52 @@ class ManagedStateTests(unittest.TestCase):
             self.assertFalse(sentinel.exists())
 
     def test_delete_requires_wine_processes_to_exit(self) -> None:
+        process_names = (
+            "wineserver",
+            r"C:\windows\system32\wine64",
+            r"C:\Program Files (x86)\Steam\steam.exe",
+            r"C:\windows\system32\winedevice.exe",
+        )
+        for process_name in process_names:
+            with self.subTest(process_name=process_name), tempfile.TemporaryDirectory() as temporary:
+                sandbox = Path(temporary)
+                destination = sandbox / "Pioneers of Pagonia.app"
+                staging_parent = sandbox / "staging"
+                staging_parent.mkdir()
+                make_installation(destination)
+                process = subprocess.Popen(
+                    [process_name, "10"], executable="/bin/sleep"
+                )
+                try:
+                    result, payload = run_helper("delete", destination, staging_parent)
+                finally:
+                    process.terminate()
+                    process.wait(timeout=2)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIsNone(payload)
+                self.assertTrue(destination.is_dir())
+                self.assertIn("exit all Wine", result.stderr)
+
+    def test_delete_unlinks_internal_symlinks_without_following_them(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             sandbox = Path(temporary)
             destination = sandbox / "Pioneers of Pagonia.app"
             staging_parent = sandbox / "staging"
             staging_parent.mkdir()
-            make_installation(destination)
-            process = subprocess.Popen(
-                ["wineserver", "10"], executable="/bin/sleep"
-            )
-            try:
-                result, payload = run_helper("delete", destination, staging_parent)
-            finally:
-                process.terminate()
-                process.wait(timeout=2)
+            managed_staging = staging_parent / "Pagonia-GPTK4b3-deployment.Linked"
+            make_staging(managed_staging)
+            external = sandbox / "personal-data"
+            external.write_text("keep", encoding="utf-8")
+            (managed_staging / "runtime-link").symlink_to(external)
 
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIsNone(payload)
-            self.assertTrue(destination.is_dir())
-            self.assertIn("exit all Wine", result.stderr)
+            result, payload = run_helper("delete", destination, staging_parent)
 
-    def test_delete_refuses_symlinks_within_managed_trees(self) -> None:
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(managed_staging.exists())
+            self.assertEqual(external.read_text(), "keep")
+
+    def test_delete_refuses_a_symlinked_managed_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             sandbox = Path(temporary)
             real_destination = sandbox / "real.app"
@@ -243,18 +301,13 @@ class ManagedStateTests(unittest.TestCase):
             staging_parent.mkdir()
             make_installation(real_destination)
             destination.symlink_to(real_destination, target_is_directory=True)
-            managed_staging = staging_parent / "Pagonia-GPTK4b3-deployment.Linked"
-            make_staging(managed_staging)
-            (managed_staging / "foreign").symlink_to("/dev/null")
 
             result, payload = run_helper("delete", destination, staging_parent)
 
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIsNone(payload)
+            self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(destination.is_symlink())
             self.assertTrue(real_destination.is_dir())
-            self.assertTrue(managed_staging.is_dir())
-            self.assertIn("symlink", result.stderr.lower())
+            self.assertIn(str(destination), {item["path"] for item in payload["unverified"]})
 
     def test_owner_control_is_required_for_roots_and_markers(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

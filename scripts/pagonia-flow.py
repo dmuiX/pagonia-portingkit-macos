@@ -86,8 +86,8 @@ def downloader(stage: Path, complete: bool) -> Path:
     transfer = load("pagonia-steam-transfer.py")
     ownership = load("pagonia-ownership.py")
     app = stage / "Steam Downloader.app"
+    ownership.stop_orphans(stage)
     if app.exists() or app.is_symlink():
-        ownership.stop_orphans(stage)
         if app.is_symlink() or not app.is_dir() or app.lstat().st_uid != os.getuid():
             raise ValueError("Unsafe retained downloader app")
         existing_prefix = app / "Contents/SharedSupport/prefix"
@@ -115,7 +115,15 @@ def downloader(stage: Path, complete: bool) -> Path:
         prefix = app / "Contents/SharedSupport/prefix"
         wine = app / "Contents/SharedSupport/wine"
         fresh = not transfer.steam_folder(prefix).joinpath("steam.exe").is_file()
-    setup = pin_steam_setup(stage) if fresh else None
+    steam = transfer.steam_folder(prefix)
+    service = prefix / "drive_c/Program Files (x86)/Common Files/Steam/steamservice.exe"
+    needs_setup = (
+        fresh
+        or not (steam / "steam.exe").is_file()
+        or not service.is_file()
+        or service.is_symlink()
+    )
+    setup = pin_steam_setup(stage) if needs_setup else None
     download.acquire(app, prefix, wine, fresh=fresh, setup=setup)
     mark_depot_complete(stage)
     return prefix
@@ -166,6 +174,23 @@ def acceptance(app: Path) -> None:
 
 
 
+def stage_identity(stage: Path) -> tuple[int, int]:
+    info = stage.lstat()
+    if (
+        stage.parent != PARENT
+        or stage.is_symlink()
+        or not stage.is_dir()
+        or info.st_uid != os.getuid()
+    ):
+        raise ValueError(f"Untrusted staging deployment: {stage}")
+    return info.st_dev, info.st_ino
+
+
+def require_stage_identity(stage: Path, expected: tuple[int, int]) -> None:
+    if stage_identity(stage) != expected:
+        raise ValueError(f"Staging deployment identity changed: {stage}")
+
+
 def clear_non_durable_build(stage: Path) -> None:
     """Resume rebuilds incomplete gameplay from the validated downloader state."""
     import stat
@@ -180,30 +205,40 @@ def clear_non_durable_build(stage: Path) -> None:
         print(f"  Rebuilding incomplete {name} from durable staging state...", flush=True)
         shutil.rmtree(item)
 
-def deploy(mode: str, stage: Path | None, gptk: Path) -> None:
+def deploy(
+    mode: str,
+    stage: Path | None,
+    gptk: Path,
+    *,
+    preflight_done: bool = False,
+    destination_identity: tuple[int, int] | None = None,
+) -> None:
     preflight = load("pagonia-preflight.py")
     publication = load("pagonia-publication.py")
     if mode == "fresh":
-        preflight.preflight(gptk)
+        if not preflight_done:
+            preflight.preflight(gptk)
+        preflight_done = True
         stage = create_stage()
         print(f"Fresh staging deployment: {stage}", flush=True)
     elif stage is None:
         raise ValueError("Resume requires validated staging")
     else:
         print(f"Resume staging deployment: {stage}", flush=True)
+    expected_stage_identity = stage_identity(stage)
     try:
         complete = validated_state(stage) == "depot-complete"
-        if not complete:
+        if not complete and not preflight_done:
             preflight.verify_inputs()
         source = downloader(stage, complete)
-        preflight.verify_gptk_files(
-            gptk, ROOT / "gptk-4.0b3-SHA256SUMS", ROOT / "gptk-4.0b3-SYMLINKS")
         print("  Constructing Wine 10 gameplay app...", flush=True)
         clear_non_durable_build(stage)
         gameplay = load("pagonia-gameplay.py")
         app = gameplay.build(stage, source, gptk)
         publication.mark_application(app)
-        backup = publication.publish(app)
+        backup = publication.publish(
+            app, expected_destination_identity=destination_identity
+        )
         try:
             acceptance(DESTINATION)
         except BaseException:
@@ -221,9 +256,11 @@ def deploy(mode: str, stage: Path | None, gptk: Path) -> None:
                 ) from stop_error
             publication.rollback(DESTINATION, backup)
             raise
+        publication.retire_backup(backup)
         print(f"Deployment accepted: {DESTINATION}", flush=True)
     except BaseException:
         if stage is not None and stage.is_dir() and not stage.is_symlink():
+            require_stage_identity(stage, expected_stage_identity)
             for name in ("session-snapshot", "client-snapshot"):
                 candidate = stage / name
                 if candidate.is_dir() and not candidate.is_symlink() and candidate.lstat().st_uid == os.getuid():
@@ -231,5 +268,5 @@ def deploy(mode: str, stage: Path | None, gptk: Path) -> None:
         print(f"Preserved Resume staging deployment: {stage}", file=sys.stderr)
         raise
     # Only private, installer-owned staging artifacts remain here.
-    if stage.is_dir() and not stage.is_symlink() and stage.parent == PARENT:
-        shutil.rmtree(stage)
+    require_stage_identity(stage, expected_stage_identity)
+    shutil.rmtree(stage)

@@ -25,14 +25,16 @@ def run_bounded(argv: list[str], log: Path, timeout: float = 120, grace: float =
                                  start_new_session=True)
         try:
             return child.wait(timeout=timeout)
-        except (subprocess.TimeoutExpired, KeyboardInterrupt):
+        except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
             os.killpg(child.pid, signal.SIGTERM)
             try:
                 child.wait(timeout=grace)
             except subprocess.TimeoutExpired:
                 os.killpg(child.pid, signal.SIGKILL)
                 child.wait()
-            raise ProcessError(f"Bounded command stopped: {argv[0]}")
+            if isinstance(error, KeyboardInterrupt):
+                raise
+            raise ProcessError(f"Bounded command timed out: {argv[0]}")
 
 
 def wine_environment(prefix: Path, wine: Path, downloader: bool) -> dict[str, str]:
@@ -60,15 +62,48 @@ def wine_command(prefix: Path, wine: Path, program: str, *args: str,
             wine_environment(prefix, wine, downloader))
 
 
-def stop_prefix(prefix: Path, wine: Path, log: Path) -> None:
+def stop_prefix(
+    prefix: Path,
+    wine: Path,
+    log: Path,
+    *,
+    downloader: bool = False,
+) -> None:
     command = wine / "bin/wineserver"
     if not command.exists():
         raise ProcessError(f"Missing wineserver: {command}")
-    env = wine_environment(prefix, wine, False)
-    run_bounded([str(command), "-k"], log, timeout=15, grace=3, env=env)
-    result = run_bounded([str(command), "-w"], log, timeout=30, grace=3, env=env)
-    if result:
+    env = wine_environment(prefix, wine, downloader)
+    kill_status = run_bounded(
+        [str(command), "-k"], log, timeout=15, grace=3, env=env
+    )
+    wait_status = run_bounded(
+        [str(command), "-w"], log, timeout=30, grace=3, env=env
+    )
+    if kill_status or wait_status:
         raise ProcessError("Wine server failed to stop cleanly")
+
+
+def stop_prefix_and_child(
+    prefix: Path,
+    wine: Path,
+    log: Path,
+    child: subprocess.Popen,
+    *,
+    downloader: bool = False,
+) -> None:
+    """Attempt both shutdown mechanisms even when either one fails."""
+    stop_error: BaseException | None = None
+    try:
+        stop_prefix(prefix, wine, log, downloader=downloader)
+    except BaseException as error:
+        stop_error = error
+    try:
+        terminate_child(child)
+    except BaseException:
+        if stop_error is None:
+            raise
+    if stop_error is not None:
+        raise stop_error
 
 
 def start_wine(prefix: Path, wine: Path, program: str, args: list[str], log: Path,

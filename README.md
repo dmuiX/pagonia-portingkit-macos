@@ -11,9 +11,10 @@ It supports managed Fresh/Resume/Delete, verified Steam and depot inputs, allowl
 session/client snapshots, and publication with rollback. The legacy installer is not
 invoked by the new entry point and remains available pending full acceptance.
 
-The new entry accepts `--fresh`, `--resume PATH`, `--delete`, `--yes`, and
-`--gptk-lib PATH`. Fresh/Delete use one global confirmation before removing
-verified managed state; ambiguous name matches remain untouched.
+The new entry accepts `--fresh`, `--resume PATH`, `--delete`, and `--yes`.
+GPTK 4.0 beta 3 is discovered from its mounted volume or matching DMG in
+`~/Downloads`. Fresh/Delete use one global confirmation before removing verified
+managed state; ambiguous name matches remain untouched.
 
 **Release gate:** A real interactive Apple Silicon Fresh run must complete Steam login,
 depot acquisition, Wine 10 online session validation, D3D12 device/swapchain creation,

@@ -18,6 +18,7 @@ GAME_NAME = "Pioneers of Pagonia"
 @dataclass(frozen=True)
 class Expectations:
     manifest: Path
+    manifest_sha256: str
     app_id: str
     build_id: str
     file_count: int
@@ -148,6 +149,10 @@ def read_trusted_manifest(expected: Expectations) -> dict[PurePosixPath, str]:
     info = expected.manifest.lstat()
     if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
         raise ValueError("Trusted SHA256 manifest is not a regular file")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected.manifest_sha256):
+        raise ValueError("Trusted manifest SHA256 is invalid")
+    if sha256(expected.manifest.read_bytes()).hexdigest() != expected.manifest_sha256:
+        raise ValueError("Trusted SHA256 manifest identity mismatch")
     entries: dict[PurePosixPath, str] = {}
     for number, line in enumerate(
         expected.manifest.read_text(encoding="utf-8", errors="strict").splitlines(), 1
@@ -385,6 +390,7 @@ def expectations_from(arguments: argparse.Namespace) -> Expectations:
         raise ValueError("Expected file count and total size must be non-negative")
     return Expectations(
         manifest=arguments.manifest,
+        manifest_sha256=arguments.manifest_sha256,
         app_id=arguments.expected_app_id,
         build_id=arguments.expected_build_id,
         file_count=arguments.expected_file_count,
@@ -398,6 +404,7 @@ def expectations_from(arguments: argparse.Namespace) -> Expectations:
 
 def add_expectations(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--manifest", required=True, type=Path)
+    parser.add_argument("--manifest-sha256", required=True)
     parser.add_argument("--expected-app-id", required=True)
     parser.add_argument("--expected-build-id", required=True)
     parser.add_argument("--expected-file-count", required=True, type=int)

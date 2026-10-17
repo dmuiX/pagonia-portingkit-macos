@@ -54,8 +54,9 @@ def install_steam(app: Path, prefix: Path, wine: Path, setup: Path) -> None:
         else:
             raise TimeoutError("SteamSetup did not finish within five minutes")
     finally:
-        proc.stop_prefix(prefix, wine, log)
-        proc.terminate_child(child)
+        proc.stop_prefix_and_child(
+            prefix, wine, log, child, downloader=True
+        )
     destination.unlink()
     service = prefix / "drive_c/Program Files (x86)/Common Files/Steam/steamservice.exe"
     if not service.is_file():
@@ -63,7 +64,7 @@ def install_steam(app: Path, prefix: Path, wine: Path, setup: Path) -> None:
     argv, env = proc.wine_command(prefix, wine, str(service), "/Install", downloader=True)
     if proc.run_bounded(argv, log, timeout=60, env=env):
         raise RuntimeError("Steam Client Service failed")
-    proc.stop_prefix(prefix, wine, log)
+    proc.stop_prefix(prefix, wine, log, downloader=True)
 
 
 def prepare_wine(prefix: Path, wine: Path, downloader: bool, log: Path) -> None:
@@ -72,7 +73,7 @@ def prepare_wine(prefix: Path, wine: Path, downloader: bool, log: Path) -> None:
     print("  Initializing isolated Wine prefix...", flush=True)
     if proc.run_bounded(argv, log, timeout=180, env=env):
         raise RuntimeError("Wine prefix initialization failed")
-    proc.stop_prefix(prefix, wine, log)
+    proc.stop_prefix(prefix, wine, log, downloader=downloader)
 
 
 def wait_for_login(steam: Path, timeout: int = 1800) -> None:
@@ -88,7 +89,7 @@ def wait_for_login(steam: Path, timeout: int = 1800) -> None:
             text = login_log.read_text(errors="replace")
             if "Received logon success response" in text and "SetLoginState: Success - OK" in text:
                 try:
-                    session.authenticated_steam_id(loginusers)
+                    session.transferable_steam_id(steam)
                     return
                 except (OSError, ValueError):
                     pass
@@ -121,8 +122,10 @@ def wait_for_depot(steam: Path, timeout: int = 21600) -> None:
             capture_output=True, timeout=25,
         )
         if status.returncode == 0:
-            print("  Pagonia depot metadata ready; validating all 856 files...", flush=True)
-            transfer.command("pagonia-depot.py", "validate", steam, *transfer.DEPOT_OPTIONS)
+            print(
+                "  Pagonia depot metadata ready; final validation follows after Steam shutdown...",
+                flush=True,
+            )
             return
         if time.monotonic() - last >= 25:
             print("  Waiting for approved Pagonia build 25784167...", flush=True)
@@ -168,13 +171,21 @@ def start_visible_steam(app: Path, prefix: Path, wine: Path, steam: Path,
         try:
             window.wait_for_window(steam)
             return child
-        except (RuntimeError, TimeoutError):
-            process.stop_prefix(prefix, wine, logs / "SteamUIShutdown.log")
-            process.terminate_child(child)
+        except (RuntimeError, TimeoutError, subprocess.TimeoutExpired):
+            process.stop_prefix_and_child(
+                prefix, wine, logs / "SteamUIShutdown.log", child,
+                downloader=True,
+            )
             if attempt == 2:
                 raise
             print("  Rechecking Steam CEF after a controlled restart...", flush=True)
             clear_cef_cache(prefix)
+        except BaseException:
+            process.stop_prefix_and_child(
+                prefix, wine, logs / "SteamUIShutdown.log", child,
+                downloader=True,
+            )
+            raise
     raise RuntimeError("Steam UI is not visibly rendered")
 
 
@@ -186,25 +197,26 @@ def acquire(app: Path, prefix: Path, wine: Path, *, fresh: bool,
     logs = app / "Contents/SharedSupport/Logs"
     logs.mkdir(parents=True, exist_ok=True)
     steam = prefix / "drive_c/Program Files (x86)/Steam"
-    if fresh:
+    service = prefix / "drive_c/Program Files (x86)/Common Files/Steam/steamservice.exe"
+    needs_setup = (
+        fresh
+        or not (steam / "steam.exe").is_file()
+        or not service.is_file()
+        or service.is_symlink()
+    )
+    if needs_setup:
         if setup is None:
-            raise ValueError("Fresh downloader needs the verified SteamSetup binary")
+            raise ValueError("Incomplete Steam installation requires verified SteamSetup")
         prepare_wine(prefix, wine, True, logs / "wineboot.log")
         install_steam(app, prefix, wine, setup)
-    elif not (steam / "steam.exe").is_file():
-        if setup is None:
-            raise ValueError("Incomplete resume requires verified SteamSetup")
-        prepare_wine(prefix, wine, True, logs / "wineboot.log")
-        install_steam(app, prefix, wine, setup)
-    if not fresh and (steam / "steam.exe").is_file():
-        service = prefix / "drive_c/Program Files (x86)/Common Files/Steam/steamservice.exe"
-        if not service.is_file() or service.is_symlink():
-            raise RuntimeError("Resumed Steam Client Service is missing or linked")
+    elif not fresh:
         argv, env = proc.wine_command(prefix, wine, str(service), "/Install", downloader=True)
         print("  Repairing the resumed Steam Client Service...", flush=True)
         if proc.run_bounded(argv, logs / "SteamServiceResume.log", timeout=60, env=env):
             raise RuntimeError("Steam Client Service repair failed")
-        proc.stop_prefix(prefix, wine, logs / "Shutdown.log")
+        proc.stop_prefix(
+            prefix, wine, logs / "Shutdown.log", downloader=True
+        )
     graphics.configure_downloader(prefix, wine)
     (steam / "logs").mkdir(parents=True, exist_ok=True)
     child = start_visible_steam(app, prefix, wine, steam, logs)
@@ -215,5 +227,6 @@ def acquire(app: Path, prefix: Path, wine: Path, *, fresh: bool,
         wait_for_depot(steam)
     finally:
         print("  Stopping the downloader before any cross-runtime transfer...", flush=True)
-        proc.stop_prefix(prefix, wine, logs / "Shutdown.log")
-        proc.terminate_child(child)
+        proc.stop_prefix_and_child(
+            prefix, wine, logs / "Shutdown.log", child, downloader=True
+        )

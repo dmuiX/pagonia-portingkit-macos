@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,17 @@ STAGING_KIND = "staging-deployment"
 STAGING_OWNER = "pagonia-gptk4b3-installer"
 STAGING_PRODUCT = "pioneers-of-pagonia"
 STAGING_STATES = ("downloader-incomplete", "depot-complete")
+PROCESS_PATTERN = re.compile(
+    r"(?:^|[/\\\s\"'])(?:wine(?:64)?(?:-preloader)?|wineserver|"
+    r"winedevice(?:\.exe)?|steam(?:webhelper|service)?\.exe|"
+    r"Pioneers of Pagonia\.exe)(?:[\s\"']|$)",
+    re.IGNORECASE,
+)
+
+
+def targeted_process(command: str) -> bool:
+    """Return whether a process belongs to the Wine/Steam/Pagonia lifecycle."""
+    return PROCESS_PATTERN.search(command) is not None
 
 
 def staging_marker(state: str) -> dict[str, object]:

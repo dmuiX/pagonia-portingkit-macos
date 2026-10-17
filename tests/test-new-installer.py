@@ -3,6 +3,7 @@
 
 from pathlib import Path
 import importlib.util
+import signal
 import sys
 import tempfile
 import unittest
@@ -17,9 +18,36 @@ spec.loader.exec_module(installer)
 
 
 class InstallerSelectionTests(unittest.TestCase):
+    def test_sigterm_is_converted_to_interrupt_for_cleanup_and_status_130(self):
+        with patch.object(installer.signal, "signal") as register:
+            installer.install_signal_handlers()
+        register.assert_called_once_with(signal.SIGTERM, installer.interrupt)
+        with self.assertRaises(KeyboardInterrupt):
+            installer.interrupt(signal.SIGTERM, None)
+
     def test_explicit_resume_rejects_outside_parent(self):
         with self.assertRaisesRegex(RuntimeError, "direct child"):
             installer.choose_state("/Applications/Other.app")
+
+    def test_unmanaged_fixed_destination_fails_before_long_deployment(self):
+        listing = {
+            "managed": [],
+            "unverified": [
+                {"path": str(installer.DESTINATION), "reason": "broad-name-match"}
+            ],
+        }
+        with patch.object(installer, "inventory", return_value=listing):
+            with self.assertRaisesRegex(RuntimeError, "unmanaged destination"):
+                installer.choose_state(None)
+
+    def test_explicit_resume_must_be_in_verified_managed_inventory(self):
+        value = "/private/tmp/Pagonia-GPTK4b3-deployment.Unverified"
+        with patch.object(
+            installer, "inventory", return_value={"managed": [], "unverified": []}
+        ), patch.object(installer, "helper") as helper:
+            with self.assertRaisesRegex(RuntimeError, "not verified managed staging"):
+                installer.choose_state(value)
+        helper.assert_not_called()
 
     def test_auto_fresh_without_staging(self):
         with patch.object(installer, "inventory", return_value={"managed": [], "unverified": []}):
@@ -50,11 +78,34 @@ class InstallerSelectionTests(unittest.TestCase):
             installer.remove_managed(True)
             run.assert_not_called()
 
+    def test_explicit_fresh_rejects_unmanaged_destination_after_deletion(self):
+        args = type("Args", (), {"fresh": True, "resume": None, "delete": False,
+                                "yes": True})()
+        guard = MagicMock()
+        guard.locate_gptk.return_value = Path("/Volumes/fake/redist/lib")
+        listing = {
+            "managed": [],
+            "unverified": [
+                {"path": str(installer.DESTINATION), "reason": "broad-name-match"}
+            ],
+        }
+        with patch.object(installer, "cli", return_value=args), \
+             patch.object(installer.os, "geteuid", return_value=501), \
+             patch.object(installer.sys, "platform", "darwin"), \
+             patch.object(installer, "PARENT", Path(tempfile.gettempdir())), \
+             patch.object(installer, "installer_lock"), \
+             patch.object(installer, "load", return_value=guard), \
+             patch.object(installer, "remove_managed"), \
+             patch.object(installer, "inventory", return_value=listing):
+            with self.assertRaisesRegex(RuntimeError, "unmanaged destination"):
+                installer.main()
+        guard.deploy.assert_not_called()
+
     def test_fresh_preflight_fails_before_deletion(self):
         args = type("Args", (), {"fresh": True, "resume": None, "delete": False,
-                                "yes": True, "gptk_lib": Path("/Volumes/fake/redist/lib")})()
+                                "yes": True})()
         guard = MagicMock()
-        guard.locate_gptk.return_value = args.gptk_lib
+        guard.locate_gptk.return_value = Path("/Volumes/fake/redist/lib")
         guard.preflight.side_effect = ValueError("missing pinned input")
         with patch.object(installer, "cli", return_value=args), \
              patch.object(installer.os, "geteuid", return_value=501), \

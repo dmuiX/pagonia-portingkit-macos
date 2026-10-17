@@ -36,6 +36,7 @@ SPEC.loader.exec_module(DEPOT)
 def expectations(manifest: Path):
     return DEPOT.Expectations(
         manifest=manifest,
+        manifest_sha256=sha256(manifest.read_bytes()).hexdigest(),
         app_id=APP_ID,
         build_id=BUILD_ID,
         file_count=len(FILES),
@@ -63,6 +64,8 @@ def run(
             *extra,
             "--manifest",
             str(trusted_manifest),
+            "--manifest-sha256",
+            sha256(trusted_manifest.read_bytes()).hexdigest(),
             "--expected-app-id",
             APP_ID,
             "--expected-build-id",

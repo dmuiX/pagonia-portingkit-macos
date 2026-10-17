@@ -5,10 +5,11 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-import re
 import signal
 import subprocess
 import time
+
+from pagonia_common import targeted_process
 
 
 class AmbiguousOwnership(RuntimeError):
@@ -27,21 +28,18 @@ def process_table() -> list[tuple[int, str]]:
 
 
 def targeted(command: str) -> bool:
-    return bool(re.search(r"""(?:^|[/\\\s"'])(?:wine(?:64)?(?:-preloader)?|wineserver|"""
-                          r"""steam(?:webhelper|service)?\.exe|"""
-                          r"""Pioneers of Pagonia\.exe)(?:[\s"']|$)""",
-                          command, flags=re.IGNORECASE))
+    return targeted_process(command)
 
 
-def active_for_staging(staging: Path) -> list[int]:
+def owned_for_staging(staging: Path) -> dict[int, str]:
     """Every targeted process must explicitly identify the selected staging."""
     root = str(staging)
-    owned = []
+    owned: dict[int, str] = {}
     for pid, command in process_table():
         if not targeted(command):
             continue
         if root in command:
-            owned.append(pid)
+            owned[pid] = command
         else:
             raise AmbiguousOwnership(
                 "Wine/Steam process ownership is ambiguous; exit unrelated Wine programs"
@@ -49,18 +47,31 @@ def active_for_staging(staging: Path) -> list[int]:
     return owned
 
 
+def active_for_staging(staging: Path) -> list[int]:
+    return list(owned_for_staging(staging))
+
+
 def stop_orphans(staging: Path, grace: int = 10) -> None:
-    pids = active_for_staging(staging)
-    for pid in pids:
-        os.kill(pid, signal.SIGTERM)
+    signalled: dict[int, str] = {}
     deadline = time.monotonic() + grace
     while time.monotonic() < deadline:
-        alive = {pid for pid, _ in process_table() if pid in pids}
-        if not alive:
+        current = owned_for_staging(staging)
+        if not current:
             return
+        for pid, command in current.items():
+            previous = signalled.get(pid)
+            if previous is not None and previous != command:
+                raise AmbiguousOwnership("Managed process identity changed before shutdown")
+            if previous is None:
+                os.kill(pid, signal.SIGTERM)
+                signalled[pid] = command
         time.sleep(0.2)
-    for pid in pids:
-        if any(row_pid == pid for row_pid, _ in process_table()):
-            os.kill(pid, signal.SIGKILL)
-    if any(pid in pids for pid, _ in process_table()):
+
+    current = owned_for_staging(staging)
+    for pid, command in current.items():
+        if signalled.get(pid) != command:
+            raise AmbiguousOwnership("Managed process identity changed before forced shutdown")
+        os.kill(pid, signal.SIGKILL)
+    time.sleep(0.2)
+    if owned_for_staging(staging):
         raise AmbiguousOwnership("Managed Wine/Steam processes did not exit")

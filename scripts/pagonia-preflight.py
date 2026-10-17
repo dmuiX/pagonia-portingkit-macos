@@ -55,6 +55,10 @@ def parse_hash_manifest(path: Path) -> dict[str, str]:
 
 
 def verify_gptk_files(lib: Path, hashes: Path, symlinks: Path) -> None:
+    for manifest in (hashes, symlinks):
+        expected = PINS.get(manifest.name)
+        if expected is None or regular_sha256(manifest) != expected:
+            raise ValueError(f"Untrusted GPTK manifest: {manifest.name}")
     if lib.is_symlink() or not lib.is_dir() or not str(lib).startswith("/Volumes/"):
         raise ValueError("GPTK source is not a directory")
     # Validate the exact symlink and file tree. No extra entries are accepted.
@@ -153,22 +157,39 @@ def preflight(gptk_lib: Path) -> None:
     return None
 
 
+def mounted_gptk_candidates() -> list[Path]:
+    candidates = []
+    for path in sorted(Path("/Volumes").glob("*/redist/lib")):
+        volume_name = path.parents[1].name.lower()
+        normalized = re.sub(r"[^a-z0-9]+", " ", volume_name)
+        if (
+            "evaluation environment for windows games" in normalized
+            and re.search(r"(?:^| )4(?: 0)? beta 3(?: |$)", normalized)
+            and (path / "wine/x86_64-windows/d3d12.dll").is_file()
+        ):
+            candidates.append(path)
+    return candidates
+
+
 def locate_gptk(explicit: Path | None = None) -> Path:
     if explicit is not None:
         return explicit
-    for path in sorted(Path("/Volumes").glob("*/redist/lib")):
-        if (path / "wine/x86_64-windows/d3d12.dll").is_file():
-            return path
-    import re
+    mounted = mounted_gptk_candidates()
+    if len(mounted) == 1:
+        return mounted[0]
+    if len(mounted) > 1:
+        raise ValueError("Multiple GPTK 4.0 beta 3 volumes are mounted")
     downloads = Path.home() / "Downloads"
     for dmg in sorted(downloads.glob("*.dmg"), key=lambda p: p.stat().st_mtime, reverse=True):
         normalized = re.sub(r"[^a-z0-9]+", " ", dmg.name.lower())
         if ("game porting toolkit" in normalized or "evaluation environment for windows games" in normalized) and re.search(r"(?:^| )4(?: 0)? beta 3(?: |$)", normalized):
             subprocess.run(["/usr/sbin/diskutil", "image", "attach", "--nobrowse",
                             "--readOnly", str(dmg)], check=True, timeout=120)
-            for path in sorted(Path("/Volumes").glob("*/redist/lib")):
-                if (path / "wine/x86_64-windows/d3d12.dll").is_file():
-                    return path
+            mounted = mounted_gptk_candidates()
+            if len(mounted) == 1:
+                return mounted[0]
+            if len(mounted) > 1:
+                raise ValueError("Mounted GPTK image is ambiguous")
             raise ValueError("Mounted GPTK image has no expected redist/lib")
     raise ValueError("GPTK 4.0 beta 3 is not mounted and its DMG was not found in Downloads")
 

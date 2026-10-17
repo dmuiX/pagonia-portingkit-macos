@@ -48,13 +48,32 @@ class FlowTests(unittest.TestCase):
                  patch.object(flow, "PARENT", root):
                 flow.deploy("fresh", None, Path("/Volumes/example/redist/lib"))
                 preflight.preflight.assert_called_once()
-                preflight.verify_inputs.assert_called_once()
+                preflight.verify_inputs.assert_not_called()
                 download.assert_called_once_with(stage, False)
                 gameplay.build.assert_called_once()
                 publication.mark_application.assert_called_once()
                 publication.publish.assert_called_once()
                 acceptance.assert_called_once_with(flow.DESTINATION)
                 self.assertFalse(stage.exists())
+
+    def test_explicit_fresh_reuses_preflight_completed_before_deletion(self):
+        loader, preflight, publication, gameplay = self.fake_modules()
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            stage = root / "Pagonia-GPTK4b3-deployment.Test"
+            stage.mkdir()
+            with patch.object(flow, "load", side_effect=loader), \
+                 patch.object(flow, "create_stage", return_value=stage), \
+                 patch.object(flow, "validated_state", return_value="downloader-incomplete"), \
+                 patch.object(flow, "downloader", return_value=stage / "downloader-prefix"), \
+                 patch.object(flow, "acceptance"), \
+                 patch.object(flow, "PARENT", root):
+                flow.deploy(
+                    "fresh", None, Path("/Volumes/example/redist/lib"),
+                    preflight_done=True,
+                )
+                preflight.preflight.assert_not_called()
+                preflight.verify_inputs.assert_not_called()
 
     def test_completed_resume_skips_fresh_preflight_and_wine_login(self):
         loader, preflight, publication, gameplay = self.fake_modules()
@@ -71,6 +90,22 @@ class FlowTests(unittest.TestCase):
                 preflight.preflight.assert_not_called()
                 download.assert_called_once_with(stage, True)
                 self.assertFalse(stage.exists())
+
+    def test_successful_acceptance_retires_previous_installation_backup(self):
+        loader, preflight, publication, gameplay = self.fake_modules()
+        backup = Path("/Applications/Pioneers of Pagonia.app.backup-test")
+        publication.publish.return_value = backup
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            stage = root / "Pagonia-GPTK4b3-deployment.Test"
+            stage.mkdir()
+            with patch.object(flow, "load", side_effect=loader), \
+                 patch.object(flow, "validated_state", return_value="depot-complete"), \
+                 patch.object(flow, "downloader", return_value=stage / "downloader-prefix"), \
+                 patch.object(flow, "acceptance"), \
+                 patch.object(flow, "PARENT", root):
+                flow.deploy("resume", stage, Path("/Volumes/example/redist/lib"))
+                publication.retire_backup.assert_called_once_with(backup)
 
     def test_failed_acceptance_rolls_back_and_preserves_resume(self):
         loader, preflight, publication, gameplay = self.fake_modules()

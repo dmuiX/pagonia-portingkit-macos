@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Isolated Wine runtime extraction and Wineskin app assembly."""
+from hashlib import sha256
 import os
 from pathlib import Path
 import plistlib
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -20,16 +22,38 @@ def verified_extract(key, parent):
     spec=importlib.util.spec_from_file_location("preflight",ROOT/"pagonia-preflight.py")
     module=importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    PINS,regular_sha256=module.PINS,module.regular_sha256
+    PINS=module.PINS
     filename, maximum, dirname=ARCHIVES[key]
     archive=ROOT/filename
-    if regular_sha256(archive)!=PINS[filename]:
-        raise ValueError("Untrusted archive: "+filename)
-    subprocess.run([sys.executable,str(ROOT/"pagonia-inputs.py"),"verify-archive",
-                    str(archive),"--max-expanded-size",str(maximum)],check=True)
-    directory=Path(tempfile.mkdtemp(prefix="verified-",dir=parent))
-    subprocess.run(["/usr/bin/tar","-xf",str(archive),"-C",str(directory)],check=True)
-    return directory, directory/dirname
+    source_fd=os.open(archive,os.O_RDONLY|os.O_NOFOLLOW)
+    snapshot_fd,snapshot_name=tempfile.mkstemp(prefix="archive-",suffix=".tar.xz",dir=parent)
+    snapshot=Path(snapshot_name)
+    try:
+        source_info=os.fstat(source_fd)
+        if (not stat.S_ISREG(source_info.st_mode)
+                or source_info.st_nlink!=1 or source_info.st_uid!=os.getuid()):
+            raise ValueError("Unsafe archive: "+filename)
+        digest=sha256()
+        with os.fdopen(snapshot_fd,"wb") as output:
+            snapshot_fd=-1
+            while data:=os.read(source_fd,1024*1024):
+                digest.update(data)
+                output.write(data)
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(snapshot,0o600)
+        if digest.hexdigest()!=PINS[filename]:
+            raise ValueError("Untrusted archive: "+filename)
+        subprocess.run([sys.executable,str(ROOT/"pagonia-inputs.py"),"verify-archive",
+                        str(snapshot),"--max-expanded-size",str(maximum)],check=True)
+        directory=Path(tempfile.mkdtemp(prefix="verified-",dir=parent))
+        subprocess.run(["/usr/bin/tar","-xf",str(snapshot),"-C",str(directory)],check=True)
+        return directory, directory/dirname
+    finally:
+        os.close(source_fd)
+        if snapshot_fd>=0:
+            os.close(snapshot_fd)
+        snapshot.unlink(missing_ok=True)
 
 def configure(app,name,bundle,flags):
     target=app/"Contents/Info.plist"

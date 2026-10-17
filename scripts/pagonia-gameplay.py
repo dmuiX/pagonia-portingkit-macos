@@ -32,6 +32,8 @@ def verify_online(prefix: Path, wine: Path, steam: Path, steam_id: str,
     connection.unlink(missing_ok=True)
     account_id = str(int(steam_id) - 76561197960265728)
     print("  Verifying transferred Steam session online under Wine 10...", flush=True)
+    # This workaround is scoped to current Steam under historical Wine 10.
+    # Wine 11 downloader rendering remains GPU-enabled and never receives it.
     child = process.start_wine(prefix, wine, str(steam / "steam.exe"),
                                ["-cef-disable-gpu", "-no-cef-sandbox", "-silent"],
                                log, downloader=False)
@@ -49,8 +51,9 @@ def verify_online(prefix: Path, wine: Path, steam: Path, steam_id: str,
             time.sleep(2)
         raise RuntimeError("Wine 10 did not prove online session authentication")
     finally:
-        process.stop_prefix(prefix, wine, prefix / "WineShutdown.log")
-        process.terminate_child(child)
+        process.stop_prefix_and_child(
+            prefix, wine, prefix / "WineShutdown.log", child
+        )
 
 
 def verify_gameplay(app: Path, prefix: Path, wine: Path, gptk: Path) -> None:
@@ -128,6 +131,7 @@ def build(staging: Path, downloader_prefix: Path, gptk: Path):
     plist = app / "Contents/Info.plist"
     with plist.open("rb") as input_file:
         info = plistlib.load(input_file)
+    # Keep Wine 10's Steam CEF workaround separate from Wine 11's GPU path.
     info["Program Flags"] = (
         "-cef-disable-gpu -no-cef-sandbox -applaunch 2155180 "
         "-NoDX12DeviceFactory -NoDX12SDKVersionCheck"

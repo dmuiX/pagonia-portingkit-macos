@@ -15,7 +15,12 @@ import subprocess
 import sys
 from typing import Any
 
-from pagonia_common import STAGING_MARKER_NAME, owner_controlled, staging_marker_state
+from pagonia_common import (
+    STAGING_MARKER_NAME,
+    owner_controlled,
+    staging_marker_state,
+    targeted_process,
+)
 
 INSTALLATION_MARKER = Path("Contents/SharedSupport/pagonia-managed-state.json")
 STAGING_MARKER = Path(STAGING_MARKER_NAME)
@@ -158,10 +163,35 @@ def discover(destination: Path, staging_parent: Path) -> dict[str, list[dict[str
         else:
             unverified.append({"path": str(destination), "reason": "broad-name-match"})
 
+    publication_prefixes = (
+        destination.name + ".backup-",
+        destination.name + ".failed-",
+    )
+    try:
+        publication_artifacts = sorted(
+            (
+                path
+                for path in destination.parent.iterdir()
+                if path.name.startswith(publication_prefixes)
+            ),
+            key=lambda item: item.name,
+        )
+    except OSError as error:
+        raise OSError(
+            f"could not enumerate publication artifacts in {destination.parent}: {error}"
+        ) from error
+    for path in publication_artifacts:
+        if _verified_installation(path):
+            managed.append({"kind": "managed-installation", "path": str(path)})
+        else:
+            unverified.append({"path": str(path), "reason": "broad-name-match"})
+
     try:
         children = sorted(staging_parent.iterdir(), key=lambda item: item.name)
-    except OSError:
-        children = []
+    except OSError as error:
+        raise OSError(
+            f"could not enumerate staging deployments in {staging_parent}: {error}"
+        ) from error
     for path in children:
         if STAGING_NAME.fullmatch(path.name) is None:
             continue
@@ -200,8 +230,6 @@ def _record_tree(item: dict[str, str]) -> RecordedTree:
             child_path = Path(child.path)
             info = child_path.lstat()
             child_relative = relative + (child.name,)
-            if stat.S_ISLNK(info.st_mode):
-                raise OSError(f"refusing symlink in managed tree: {child_path}")
             if info.st_dev != root.st_dev:
                 raise OSError(f"refusing cross-filesystem managed tree: {child_path}")
             entries[child_relative] = (info.st_dev, info.st_ino, info.st_mode)
@@ -303,24 +331,26 @@ def _managed_process_running() -> bool:
         if len(fields) != 2 or fields[0] != uid:
             continue
         command = fields[1]
-        if re.search(
-            r"(?:^|/)(?:wine(?:64)?(?:-preloader)?|wineserver|"
-            r"steam(?:webhelper|service)?\.exe|Pioneers of Pagonia\.exe)(?:\s|$)",
-            command,
-            re.IGNORECASE,
-        ):
+        if targeted_process(command):
             return True
     return False
 
 
 def delete_managed(
-    destination: Path, staging_parent: Path
+    destination: Path,
+    staging_parent: Path,
+    expected_paths: set[str] | None = None,
 ) -> dict[str, list[dict[str, str]]]:
     listing = discover(destination, staging_parent)
+    actual_paths = {item["path"] for item in listing["managed"]}
+    if expected_paths is not None and actual_paths != expected_paths:
+        raise OSError("managed state changed after deletion confirmation")
     trees = [_record_tree(item) for item in listing["managed"]]
     if trees and _managed_process_running():
         raise OSError("exit all Wine, Steam, and Pagonia processes before deletion")
     for tree in trees:
+        if _managed_process_running():
+            raise OSError("Wine, Steam, or Pagonia started during deletion")
         _remove_recorded_tree(tree)
     return {"deleted": listing["managed"], "unverified": listing["unverified"]}
 
@@ -330,6 +360,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("command", choices=("list", "delete"))
     parser.add_argument("--destination", required=True, type=Path)
     parser.add_argument("--staging-parent", required=True, type=Path)
+    parser.add_argument("--expected-path", action="append", default=[])
     return parser.parse_args()
 
 
@@ -343,7 +374,10 @@ def main() -> int:
         return 2
     try:
         if arguments.command == "delete":
-            result = delete_managed(arguments.destination, arguments.staging_parent)
+            expected = set(arguments.expected_path) if arguments.expected_path else None
+            result = delete_managed(
+                arguments.destination, arguments.staging_parent, expected
+            )
         else:
             result = discover(arguments.destination, arguments.staging_parent)
     except OSError as error:

@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import signal
 import stat
 import subprocess
 import sys
@@ -20,6 +21,15 @@ MANAGED = ROOT / "pagonia-managed-state.py"
 PARENT = Path("/private/tmp")
 PREFIX = "Pagonia-GPTK4b3-deployment."
 DESTINATION = Path("/Applications/Pioneers of Pagonia.app")
+
+
+def interrupt(_signum: int, _frame: object) -> None:
+    """Enter normal Python unwinding so owned children and staging are cleaned."""
+    raise KeyboardInterrupt
+
+
+def install_signal_handlers() -> None:
+    signal.signal(signal.SIGTERM, interrupt)
 
 
 def load(filename: str):
@@ -69,11 +79,23 @@ def remove_managed(assume_yes: bool) -> None:
     for item in found["unverified"]:
         print(f"  Unverified name match preserved: {item['path']}")
     if found["managed"]:
+        expected_arguments = [
+            argument
+            for item in found["managed"]
+            for argument in ("--expected-path", item["path"])
+        ]
         deleted = json.loads(helper(
             MANAGED, "delete", "--destination", str(DESTINATION),
-            "--staging-parent", str(PARENT)))
+            "--staging-parent", str(PARENT), *expected_arguments))
         for item in deleted["deleted"]:
             print(f"  Deleted: {item['path']}")
+
+
+def reject_unmanaged_destination(found: dict) -> None:
+    if any(item["path"] == str(DESTINATION) for item in found["unverified"]):
+        raise RuntimeError(
+            f"Refusing to replace unmanaged destination: {DESTINATION}"
+        )
 
 
 def choose_state(resume: str | None) -> tuple[str, str | None]:
@@ -87,12 +109,22 @@ def choose_state(resume: str | None) -> tuple[str, str | None]:
                "--evidence-validator", *flow.depot_validator(candidate))
 
     if resume:
-        validate(resume)
-        return "resume", resume
+        candidate = Path(resume)
+        if not candidate.is_absolute() or candidate.parent != PARENT:
+            raise RuntimeError("--resume must name a direct child of /private/tmp")
 
     found = inventory()
+    reject_unmanaged_destination(found)
+
     staging = [item["path"] for item in found["managed"]
                if item["kind"] == "staging-deployment"]
+    if resume:
+        if resume not in staging:
+            raise RuntimeError(
+                f"Resume path is not verified managed staging: {resume}"
+            )
+        validate(resume)
+        return "resume", resume
     for path in staging:
         validate(path)
     if len(staging) > 1:
@@ -120,6 +152,15 @@ def installer_lock():
         os.close(descriptor)
 
 
+def current_destination_identity() -> tuple[int, int] | None:
+    if not os.path.lexists(DESTINATION):
+        return None
+    metadata = DESTINATION.lstat()
+    if not stat.S_ISDIR(metadata.st_mode) or DESTINATION.is_symlink():
+        raise RuntimeError(f"Unsafe destination: {DESTINATION}")
+    return metadata.st_dev, metadata.st_ino
+
+
 def cli() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_mutually_exclusive_group()
@@ -129,14 +170,13 @@ def cli() -> argparse.Namespace:
                        help="Resume the specified validated staging deployment")
     modes.add_argument("--delete", action="store_true",
                        help="Remove verified managed state without installing")
-    parser.add_argument("--yes", "-y", action="store_true",
+    parser.add_argument("--yes", action="store_true",
                         help="Confirm only global managed-state deletion")
-    parser.add_argument("--gptk-lib", type=Path, metavar="PATH",
-                        help="Mounted GPTK 4.0 beta 3 redist/lib directory")
     return parser.parse_args()
 
 
 def main() -> int:
+    install_signal_handlers()
     arguments = cli()
     if os.geteuid() == 0:
         raise RuntimeError("Do not run the installer as root")
@@ -150,19 +190,27 @@ def main() -> int:
             return 0
 
         preflight = load("pagonia-preflight.py")
-        gptk = preflight.locate_gptk(arguments.gptk_lib)
+        gptk = preflight.locate_gptk()
         if arguments.fresh:
             # Authenticate inputs before destructive managed-state removal.
             preflight.preflight(gptk)
             remove_managed(arguments.yes)
+            reject_unmanaged_destination(inventory())
             mode, path = "fresh", None
         else:
             mode, path = choose_state(arguments.resume)
         print(f"Deployment mode: {mode}", flush=True)
         if path:
             print(f"Validated staging deployment: {path}", flush=True)
+        expected_destination_identity = current_destination_identity()
         flow = load("pagonia-flow.py")
-        flow.deploy(mode, Path(path) if path else None, gptk)
+        flow.deploy(
+            mode,
+            Path(path) if path else None,
+            gptk,
+            preflight_done=arguments.fresh,
+            destination_identity=expected_destination_identity,
+        )
     return 0
 
 

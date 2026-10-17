@@ -55,7 +55,7 @@ def parse_hash_manifest(path: Path) -> dict[str, str]:
 
 
 def verify_gptk_files(lib: Path, hashes: Path, symlinks: Path) -> None:
-    if lib.is_symlink() or not lib.is_dir():
+    if lib.is_symlink() or not lib.is_dir() or not str(lib).startswith("/Volumes/"):
         raise ValueError("GPTK source is not a directory")
     # Validate the exact symlink and file tree. No extra entries are accepted.
     expected_files = parse_hash_manifest(hashes)
@@ -63,7 +63,7 @@ def verify_gptk_files(lib: Path, hashes: Path, symlinks: Path) -> None:
     for line in symlinks.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
-        relative, sep, target = line.partition(" -> ")
+        relative, sep, target = line.partition("\t")
         if not sep or relative in expected_links or relative in expected_files:
             raise ValueError("Invalid GPTK symlink manifest")
         expected_links[relative] = target
@@ -86,6 +86,41 @@ def verify_gptk_files(lib: Path, hashes: Path, symlinks: Path) -> None:
             raise ValueError(f"Unsupported GPTK entry: {relative}")
     if files != set(expected_files) or links != set(expected_links):
         raise ValueError("GPTK inventory mismatch")
+    for root in ("external", "wine"):
+        if (lib / root).is_symlink() or not (lib / root).is_dir():
+            raise ValueError(f"Missing or linked GPTK root: {root}")
+    info = subprocess.run(["/bin/df", str(lib)], check=True, capture_output=True,
+                          text=True).stdout.splitlines()
+    device = info[-1].split()[0]
+    mount_info = plistlib.loads(subprocess.run(
+        ["/usr/sbin/diskutil", "info", "-plist", device],
+        check=True, capture_output=True, timeout=30).stdout)
+    if mount_info.get("Writable", True) or mount_info.get("WritableVolume", True):
+        raise ValueError("GPTK source volume is writable")
+    mount = Path(mount_info["MountPoint"]).resolve(strict=True)
+    resolved = lib.resolve(strict=True)
+    if mount != resolved and mount not in resolved.parents:
+        raise ValueError("GPTK source is outside verified mount")
+    signed = 0
+    for name in expected_files:
+        path = lib / name
+        with path.open("rb") as source:
+            signature = source.read(4)
+        if signature not in (
+            bytes.fromhex("cffaedfe"), bytes.fromhex("cafebabe"),
+            bytes.fromhex("feedfacf"), bytes.fromhex("bebafeca"),
+        ):
+            continue
+        check = subprocess.run(
+            ["/usr/bin/codesign", "--verify", "--strict", "-R=anchor apple", str(path)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30,
+        )
+        if check.returncode:
+            raise ValueError(f"GPTK binary is not Apple-signed: {name}")
+        signed += 1
+    if signed != 6:
+        raise ValueError(f"Expected six Apple-signed GPTK binaries; found {signed}")
+
 
 
 def verify_destination(destination: Path) -> None:
@@ -113,7 +148,21 @@ def preflight(gptk_lib: Path) -> None:
     verify_screen_recording()
     verify_gptk_files(gptk_lib, ROOT / "gptk-4.0b3-SHA256SUMS",
                       ROOT / "gptk-4.0b3-SYMLINKS")
-    # Contents on writable media can change after verification.
-    # Real deployment must additionally authenticate read-only mounted media
-    # and Apple signing before executing or publishing GPTK code.
-    raise ValueError("Read-only mount and Apple signature gate not yet implemented")
+    return None
+
+
+def locate_gptk(explicit: Path | None = None) -> Path:
+    if explicit is not None:
+        return explicit
+    for path in sorted(Path("/Volumes").glob("*/redist/lib")):
+        if (path / "wine/x86_64-windows/d3d12.dll").is_file():
+            return path
+    import re
+    downloads = Path.home() / "Downloads"
+    for dmg in sorted(downloads.glob("*.dmg"), key=lambda p: p.stat().st_mtime, reverse=True):
+        normalized = re.sub(r"[^a-z0-9]+", " ", dmg.name.lower())
+        if ("game porting toolkit" in normalized or "evaluation environment for windows games" in normalized) and re.search(r"\\b4(?: 0)? beta 3\\b", normalized):
+            subprocess.run(["/usr/sbin/diskutil", "image", "attach", "--nobrowse",
+                            "--readOnly", str(dmg)], check=True, timeout=120)
+            return locate_gptk(None)
+    raise ValueError("GPTK 4.0 beta 3 is not mounted and its DMG was not found in Downloads")

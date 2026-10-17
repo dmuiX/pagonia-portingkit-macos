@@ -1,0 +1,29 @@
+name: Modular installer validation
+on:
+  push:
+    branches: [fix/canonical-staging-discovery]
+  pull_request:
+  workflow_dispatch:
+jobs:
+  static-and-unit:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - name: Bash syntax
+        run: |
+          bash -n scripts/install-pagonia-new.sh
+          bash -n scripts/install-pagonia-gptk4b3.sh
+      - name: Python syntax
+        run: python3 -m compileall -q scripts tests
+      - name: ShellCheck
+        run: |
+          brew list shellcheck >/dev/null 2>&1 || brew install shellcheck
+          shellcheck scripts/install-pagonia-new.sh
+      - name: Run isolated modular unit tests
+        run: |
+          python3 -m unittest discover -s tests -p 'test-new-installer.py' -v
+          python3 -m unittest discover -s tests -p 'test-pagonia-process.py' -v
+      - name: Patch whitespace
+        run: git diff --check HEAD~1 HEAD

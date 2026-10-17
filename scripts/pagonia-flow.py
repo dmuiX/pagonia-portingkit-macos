@@ -180,6 +180,18 @@ def deploy(mode: str, stage: Path | None, gptk: Path) -> None:
         try:
             acceptance(DESTINATION)
         except BaseException:
+            # Do not move a still-running Wineskin game during rollback.
+            process = load("pagonia-process.py")
+            published_prefix = DESTINATION / "Contents/SharedSupport/prefix"
+            published_wine = DESTINATION / "Contents/SharedSupport/wine"
+            try:
+                process.stop_prefix(published_prefix, published_wine,
+                                    DESTINATION / "Contents/SharedSupport/Logs/RollbackShutdown.log")
+            except BaseException as stop_error:
+                raise RuntimeError(
+                    "Published Wine processes did not stop; leaving backup and deployment "
+                    "unchanged rather than moving a live application"
+                ) from stop_error
             publication.rollback(DESTINATION, backup)
             raise
         print(f"Deployment accepted: {DESTINATION}", flush=True)

@@ -27,9 +27,9 @@ def process_table() -> list[tuple[int, str]]:
 
 
 def targeted(command: str) -> bool:
-    return bool(re.search(r"(?:^|[/\s])(?:wine(?:64)?(?:-preloader)?|wineserver|"
-                          r"steam(?:webhelper|service)?\.exe|"
-                          r"Pioneers of Pagonia\.exe)(?:\s|$)",
+    return bool(re.search(r"""(?:^|[/\\\s"'])(?:wine(?:64)?(?:-preloader)?|wineserver|"""
+                          r"""steam(?:webhelper|service)?\.exe|"""
+                          r"""Pioneers of Pagonia\.exe)(?:[\s"']|$)""",
                           command, flags=re.IGNORECASE))
 
 

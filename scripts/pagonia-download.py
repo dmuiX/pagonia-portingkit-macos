@@ -129,6 +129,15 @@ def acquire(app: Path, prefix: Path, wine: Path, *, fresh: bool,
             raise ValueError("Incomplete resume requires verified SteamSetup")
         prepare_wine(prefix, wine, True, logs / "wineboot.log")
         install_steam(app, prefix, wine, setup)
+    if not fresh and (steam / "steam.exe").is_file():
+        service = prefix / "drive_c/Program Files (x86)/Common Files/Steam/steamservice.exe"
+        if not service.is_file() or service.is_symlink():
+            raise RuntimeError("Resumed Steam Client Service is missing or linked")
+        argv, env = proc.wine_command(prefix, wine, str(service), "/Install", downloader=True)
+        print("  Repairing the resumed Steam Client Service...", flush=True)
+        if proc.run_bounded(argv, logs / "SteamServiceResume.log", timeout=60, env=env):
+            raise RuntimeError("Steam Client Service repair failed")
+        proc.stop_prefix(prefix, wine, logs / "Shutdown.log")
     graphics.configure_downloader(prefix, wine)
     (steam / "logs").mkdir(parents=True, exist_ok=True)
     # A Resume must not mistake a retained prior login log for a fresh success.

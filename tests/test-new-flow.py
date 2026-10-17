@@ -22,6 +22,7 @@ class FlowTests(unittest.TestCase):
         publication = MagicMock()
         publication.publish.return_value = None
         gameplay = MagicMock()
+        process = MagicMock()
         gameplay.build.return_value = Path("/tmp/Pioneers of Pagonia.app")
 
         def loader(filename):
@@ -29,6 +30,7 @@ class FlowTests(unittest.TestCase):
                 "pagonia-preflight.py": preflight,
                 "pagonia-publication.py": publication,
                 "pagonia-gameplay.py": gameplay,
+                "pagonia-process.py": process,
             }[filename]
         return loader, preflight, publication, gameplay
 

@@ -11,21 +11,27 @@ jobs:
       - uses: actions/checkout@v4
         with:
           lfs: false
-      - name: Bash syntax
+      - name: Bash syntax and ShellCheck
         run: |
           bash -n scripts/install-pagonia-new.sh
           bash -n scripts/install-pagonia-gptk4b3.sh
-      - name: Python syntax
-        run: python3 -m compileall -q scripts tests
-      - name: ShellCheck
-        run: |
           brew list shellcheck >/dev/null 2>&1 || brew install shellcheck
           shellcheck scripts/install-pagonia-new.sh
-      - name: Run isolated modular unit tests
+      - name: Python syntax
+        run: python3 -m compileall -q scripts tests
+      - name: New orchestration, process and graphics tests
         run: |
-          python3 -m unittest discover -s tests -p 'test-new-installer.py' -v
-          python3 -m unittest discover -s tests -p 'test-pagonia-process.py' -v
-      - name: Graphics configuration tests
-        run: python3 -m unittest discover -s tests -p 'test-new-graphics.py' -v
+          python3 tests/test-new-installer.py
+          python3 tests/test-pagonia-process.py
+          python3 tests/test-new-graphics.py
+      - name: Existing component regression tests
+        run: |
+          for test in tests/test-*.py; do
+            case "$test" in
+              tests/test-new-installer.py|tests/test-pagonia-process.py|tests/test-new-graphics.py) continue ;;
+            esac
+            echo "Testing $test"
+            python3 "$test"
+          done
       - name: Patch whitespace
         run: git diff --check HEAD~1 HEAD

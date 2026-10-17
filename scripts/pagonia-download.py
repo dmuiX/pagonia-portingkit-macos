@@ -31,12 +31,32 @@ def install_steam(app: Path, prefix: Path, wine: Path, setup: Path) -> None:
     shutil.copy2(setup, destination)
     log = app / "Contents/SharedSupport/Logs/SteamSetup.log"
     print("  Installing the pinned Steam client in Wine 11.17...", flush=True)
-    argv, env = proc.wine_command(prefix, wine, str(destination), "/S", downloader=True)
-    status = proc.run_bounded(argv, log, timeout=300, env=env)
-    if status or not (steam / "steam.exe").is_file():
-        raise RuntimeError("SteamSetup did not install Steam")
+    child = proc.start_wine(prefix, wine, str(destination), ["/S"], log,
+                            downloader=True)
+    print("  Waiting for SteamSetup.exe to finish...", flush=True)
+    deadline = time.monotonic() + 300
+    last_status = time.monotonic()
+    try:
+        while time.monotonic() < deadline:
+            active = subprocess.run(["/usr/bin/pgrep", "-u", str(__import__("os").getuid()),
+                                     "-f", r"SteamSetup\.exe"],
+                                    capture_output=True)
+            if ((steam / "steam.exe").is_file()
+                    and (steam / "uninstall.exe").is_file()
+                    and active.returncode == 1):
+                break
+            if child.poll() is not None and child.returncode not in (None, 0):
+                raise RuntimeError("SteamSetup exited unsuccessfully")
+            if time.monotonic() - last_status >= 25:
+                print("  Still waiting for SteamSetup completion...", flush=True)
+                last_status = time.monotonic()
+            time.sleep(2)
+        else:
+            raise TimeoutError("SteamSetup did not finish within five minutes")
+    finally:
+        proc.stop_prefix(prefix, wine, log)
+        proc.terminate_child(child)
     destination.unlink()
-    proc.stop_prefix(prefix, wine, log)
     service = prefix / "drive_c/Program Files (x86)/Common Files/Steam/steamservice.exe"
     if not service.is_file():
         raise RuntimeError("Steam Client Service is missing")

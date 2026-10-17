@@ -50,6 +50,7 @@ class InstallerSelectionTests(unittest.TestCase):
         with patch.object(installer, "cli", return_value=args), \
              patch.object(installer.os, "geteuid", return_value=501), \
              patch.object(installer.sys, "platform", "darwin"), \
+             patch.object(installer, "PARENT", Path(tempfile.gettempdir())), \
              patch.object(installer, "remove_managed") as delete:
             with self.assertRaisesRegex(RuntimeError, "not implemented"):
                 installer.main()

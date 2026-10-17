@@ -50,6 +50,13 @@ def visible_window() -> bool:
 
 
 def wait_for_window(steam_root: Path, timeout: int = 180) -> None:
+    # Screen capture access can change between Fresh and Resume.
+    permission = subprocess.run(
+        ["/usr/bin/swift", "-e",
+         "import CoreGraphics; import Darwin; exit(CGPreflightScreenCaptureAccess() ? 0 : 1)"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+    if permission.returncode:
+        raise RuntimeError("Terminal needs Screen Recording permission for Steam UI verification")
     log = steam_root / "logs/steamui_html.txt"
     deadline = time.monotonic() + timeout
     last_status = time.monotonic()

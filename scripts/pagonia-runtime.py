@@ -79,3 +79,36 @@ def build_app(staging,kind):
               else "com.soad1337.pioneersofpagonia.gptk4b3",
               "-no-cef-sandbox -vgui" if kind=="downloader" else "-applaunch 2155180")
     return app,prefix,wine
+
+
+def refresh_downloader(staging):
+    """Replace a retained Wine 11 runtime from its verified archive before reuse."""
+    from pathlib import Path
+    import stat
+
+    app = staging / "Steam Downloader.app"
+    shared = app / "Contents/SharedSupport"
+    prefix = shared / "prefix"
+    for candidate in (app, shared, prefix):
+        info = candidate.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            raise ValueError(f"Untrusted resumed downloader path: {candidate}")
+        if stat.S_IMODE(info.st_mode) & 0o022:
+            raise ValueError(f"Resumed downloader is group/world-writable: {candidate}")
+    extracted, engine = verified_extract("downloader", staging)
+    try:
+        replacements = (
+            (engine / "Wine", shared / "wine"),
+            (engine / "DXVK", shared / "dxvk"),
+        )
+        for source, destination in replacements:
+            if destination.is_symlink():
+                raise ValueError(f"Linked retained runtime: {destination}")
+            if destination.exists():
+                shutil.rmtree(destination)
+            shutil.copytree(source, destination, symlinks=True)
+    finally:
+        shutil.rmtree(extracted)
+    if not (shared / "wine/bin/wine64").exists():
+        raise ValueError("Resumed downloader runtime incomplete")
+    return app, prefix, shared / "wine"

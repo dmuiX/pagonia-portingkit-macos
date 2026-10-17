@@ -136,7 +136,20 @@ def _verified_staging(path: Path) -> bool:
         return False
 
 
+
+
+def validate_staging_parent(parent: Path) -> None:
+    """A user-private directory or root-owned sticky /private/tmp is trusted."""
+    info = parent.lstat()
+    if not stat.S_ISDIR(info.st_mode) or parent.is_symlink():
+        raise OSError(f"Staging parent is not a real directory: {parent}")
+    system_tmp = (parent == Path("/private/tmp") and info.st_uid == 0
+                  and stat.S_IMODE(info.st_mode) == 0o1777)
+    if not system_tmp and not owner_controlled(parent):
+        raise OSError(f"Staging parent must be owner-controlled: {parent}")
+
 def discover(destination: Path, staging_parent: Path) -> dict[str, list[dict[str, str]]]:
+    validate_staging_parent(staging_parent)
     managed: list[dict[str, str]] = []
     unverified: list[dict[str, str]] = []
     if os.path.lexists(destination):

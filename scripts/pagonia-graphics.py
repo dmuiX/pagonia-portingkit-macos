@@ -46,3 +46,47 @@ def gameplay_graphics(prefix: Path, wine: Path, gptk: Path) -> None:
     for name in ("dxgi.dll", "d3d12.dll"):
         shutil.copy2(gptk / "wine/x86_64-windows" / name, system / name)
     (system / "d3d12core.dll").write_bytes(core)
+
+def registry_overrides(prefix: Path, entries: dict[str, str], app: str | None = None) -> None:
+    """Replace just the selected Wine override section, with one source of truth."""
+    import re
+    path = prefix / "user.reg"
+    original = path.read_text(errors="surrogateescape")
+    components = ["Software", "Wine"]
+    if app:
+        components.extend(["AppDefaults", app])
+    components.append("DllOverrides")
+    name = "\\\\".join(components)
+    section = "[" + name + "]"
+    pattern = re.compile(r"(?ms)^" + re.escape(section) + r"[^\n]*\n.*?(?=^\[|\Z)")
+    original = pattern.sub("", original)
+    addition = "\n" + section + " 0\n#time=1\n"
+    for key, value in entries.items():
+        if not re.fullmatch(r"[A-Za-z0-9*._-]+", key) or value not in ("native,builtin", "builtin"):
+            raise ValueError("Invalid DLL override")
+        addition += f'"{key}"="{value}"\n'
+    path.write_text(original + addition, errors="surrogateescape")
+
+
+def configure_downloader(prefix: Path, wine: Path) -> None:
+    downloader_graphics(prefix, wine)
+    settings = {"dxgi": "native,builtin",
+                "d3d10core": "native,builtin", "d3d11": "native,builtin"}
+    for executable in ("steam.exe", "steamwebhelper.exe", "steamservice.exe",
+                       "gameoverlayui.exe", "gameoverlayui64.exe"):
+        registry_overrides(prefix, settings, executable)
+
+
+def configure_gameplay(prefix: Path, wine: Path, gptk: Path) -> None:
+    gameplay_graphics(prefix, wine, gptk)
+    registry_overrides(prefix, {"*d3d12": "native,builtin", "*dxgi": "native,builtin",
+                                "*d3d12core": "builtin"})
+    import re
+    registry = prefix / "system.reg"
+    contents = registry.read_text(errors="surrogateescape")
+    for key in ("CurrentBuild", "CurrentBuildNumber"):
+        contents = re.sub(r'("' + key + r'"=")19043("$)', r"\g<1>19045\2",
+                          contents, flags=re.MULTILINE)
+        if f'"{key}"="19045"' not in contents:
+            raise ValueError(f"Missing Windows build override: {key}")
+    registry.write_text(contents, errors="surrogateescape")

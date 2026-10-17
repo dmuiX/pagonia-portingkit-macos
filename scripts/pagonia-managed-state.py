@@ -26,7 +26,7 @@ INSTALLATION_IDENTITY = {
     "product": "pioneers-of-pagonia",
 }
 BUNDLE_ID = "com.soad1337.pioneersofpagonia.gptk4b3"
-STAGING_NAME = re.compile(r"Pagonia-GPTK4b3-deployment\.[A-Za-z0-9]+\Z")
+STAGING_NAME = re.compile(r"Pagonia-GPTK4b3-deployment\.[A-Za-z0-9_]+\Z")
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

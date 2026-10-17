@@ -101,12 +101,28 @@ def refresh_downloader(staging):
             (engine / "Wine", shared / "wine"),
             (engine / "DXVK", shared / "dxvk"),
         )
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pagonia_inputs", ROOT / "pagonia-inputs.py")
+        inputs = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(inputs)
         for source, destination in replacements:
             if destination.is_symlink():
                 raise ValueError(f"Linked retained runtime: {destination}")
-            if destination.exists():
+            expected = inputs.runtime_inventory(source)
+            if destination.is_dir():
+                try:
+                    if inputs.runtime_inventory(destination) == expected:
+                        print(f"  Reusing exact pinned runtime inventory: {destination.name}", flush=True)
+                        continue
+                except (OSError, ValueError):
+                    pass
+                print(f"  Replacing changed runtime inventory: {destination.name}", flush=True)
                 shutil.rmtree(destination)
+            elif destination.exists():
+                raise ValueError(f"Unexpected runtime path type: {destination}")
             shutil.copytree(source, destination, symlinks=True)
+            if inputs.runtime_inventory(destination) != expected:
+                raise ValueError(f"Reconstructed runtime inventory mismatch: {destination}")
     finally:
         shutil.rmtree(extracted)
     if not (shared / "wine/bin/wine64").exists():

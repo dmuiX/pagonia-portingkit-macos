@@ -111,6 +111,53 @@ def wait_for_depot(steam: Path, timeout: int = 21600) -> None:
     raise TimeoutError("Pagonia depot download did not complete")
 
 
+def clear_cef_cache(prefix: Path) -> None:
+    """Remove only recognized user-owned CEF cache directories between retries."""
+    import os
+    import stat
+    import shutil
+    users = prefix / "drive_c/users"
+    if not users.is_dir() or users.is_symlink():
+        raise RuntimeError("Unsafe Steam CEF user-profile root")
+    for profile in users.iterdir():
+        cache = profile / "AppData/Local/Steam/htmlcache"
+        if not cache.exists() and not cache.is_symlink():
+            continue
+        current = users
+        for component in cache.relative_to(users).parts:
+            current = current / component
+            if current.is_symlink():
+                raise RuntimeError("Linked Steam CEF cache path")
+        info = cache.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            raise RuntimeError("Untrusted Steam CEF cache directory")
+        shutil.rmtree(cache)
+
+
+def start_visible_steam(app: Path, prefix: Path, wine: Path, steam: Path,
+                        logs: Path):
+    process = load("pagonia-process.py")
+    window = load("pagonia-window.py")
+    for attempt in (1, 2):
+        for name in ("steamui_login.txt", "steamui_html.txt"):
+            (steam / "logs" / name).unlink(missing_ok=True)
+        print(f"  Starting Steam UI (retry {attempt - 1}/1)...", flush=True)
+        child = process.start_wine(prefix, wine, str(steam / "steam.exe"),
+                                   ["-no-cef-sandbox", "-vgui"],
+                                   logs / "SteamUI.log", downloader=True)
+        try:
+            window.wait_for_window(steam)
+            return child
+        except (RuntimeError, TimeoutError):
+            process.stop_prefix(prefix, wine, logs / "SteamUIShutdown.log")
+            process.terminate_child(child)
+            if attempt == 2:
+                raise
+            print("  Rechecking Steam CEF after a controlled restart...", flush=True)
+            clear_cef_cache(prefix)
+    raise RuntimeError("Steam UI is not visibly rendered")
+
+
 def acquire(app: Path, prefix: Path, wine: Path, *, fresh: bool,
             setup: Path | None = None) -> None:
     proc = load("pagonia-process.py")
@@ -140,14 +187,8 @@ def acquire(app: Path, prefix: Path, wine: Path, *, fresh: bool,
         proc.stop_prefix(prefix, wine, logs / "Shutdown.log")
     graphics.configure_downloader(prefix, wine)
     (steam / "logs").mkdir(parents=True, exist_ok=True)
-    # A Resume must not mistake a retained prior login log for a fresh success.
-    for name in ("steamui_login.txt", "steamui_html.txt"):
-        (steam / "logs" / name).unlink(missing_ok=True)
-    child = proc.start_wine(prefix, wine, str(steam / "steam.exe"),
-                            ["-no-cef-sandbox", "-vgui"],
-                            logs / "SteamUI.log", downloader=True)
+    child = start_visible_steam(app, prefix, wine, steam, logs)
     try:
-        window.wait_for_window(steam)
         wait_for_login(steam)
         print("  Steam sign-in completed.", flush=True)
         install_request(prefix, wine, steam, logs / "SteamInstallRequest.log")

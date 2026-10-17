@@ -91,5 +91,31 @@ class FlowTests(unittest.TestCase):
                 self.assertTrue(stage.exists())
 
 
+    def test_incomplete_gameplay_is_removed_without_touching_downloader(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            gameplay = root / "Pioneers of Pagonia.app"
+            session = root / "session-snapshot"
+            downloader = root / "Steam Downloader.app"
+            gameplay.mkdir()
+            session.mkdir()
+            downloader.mkdir()
+            (downloader / "keep").write_text("authenticated")
+            flow.clear_non_durable_build(root)
+            self.assertFalse(gameplay.exists())
+            self.assertFalse(session.exists())
+            self.assertEqual((downloader / "keep").read_text(), "authenticated")
+
+    def test_rebuilding_rejects_linked_gameplay(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            target = root / "other"
+            target.mkdir()
+            (root / "Pioneers of Pagonia.app").symlink_to(target, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "Untrusted unfinished"):
+                flow.clear_non_durable_build(root)
+            self.assertTrue(target.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

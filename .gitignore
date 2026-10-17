@@ -1,6 +1,8 @@
 .DS_Store
 .venv-analysis/
-analysis/
+__pycache__/
+*.py[cod]
+analysis/*
+!analysis/whisky-wine-11.16-pagonia-test-2026-10-16.md
 reports/
-docs/
 *.app

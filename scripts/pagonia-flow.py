@@ -164,6 +164,22 @@ def acceptance(app: Path) -> None:
     raise RuntimeError("Game did not satisfy D3D12 initialization acceptance")
 
 
+
+
+def clear_non_durable_build(stage: Path) -> None:
+    """Resume rebuilds incomplete gameplay from the validated downloader state."""
+    import stat
+    for name in ("Pioneers of Pagonia.app", "session-snapshot", "client-snapshot"):
+        item = stage / name
+        if not item.exists() and not item.is_symlink():
+            continue
+        info = item.lstat()
+        if (item.is_symlink() or not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != os.getuid()):
+            raise ValueError(f"Untrusted unfinished gameplay artifact: {item}")
+        print(f"  Rebuilding incomplete {name} from durable staging state...", flush=True)
+        shutil.rmtree(item)
+
 def deploy(mode: str, stage: Path | None, gptk: Path) -> None:
     preflight = load("pagonia-preflight.py")
     publication = load("pagonia-publication.py")
@@ -183,6 +199,7 @@ def deploy(mode: str, stage: Path | None, gptk: Path) -> None:
         preflight.verify_gptk_files(
             gptk, ROOT / "gptk-4.0b3-SHA256SUMS", ROOT / "gptk-4.0b3-SYMLINKS")
         print("  Constructing Wine 10 gameplay app...", flush=True)
+        clear_non_durable_build(stage)
         gameplay = load("pagonia-gameplay.py")
         app = gameplay.build(stage, source, gptk)
         publication.mark_application(app)
@@ -206,6 +223,11 @@ def deploy(mode: str, stage: Path | None, gptk: Path) -> None:
             raise
         print(f"Deployment accepted: {DESTINATION}", flush=True)
     except BaseException:
+        if stage is not None and stage.is_dir() and not stage.is_symlink():
+            for name in ("session-snapshot", "client-snapshot"):
+                candidate = stage / name
+                if candidate.is_dir() and not candidate.is_symlink() and candidate.lstat().st_uid == os.getuid():
+                    shutil.rmtree(candidate)
         print(f"Preserved Resume staging deployment: {stage}", file=sys.stderr)
         raise
     # Only private, installer-owned staging artifacts remain here.

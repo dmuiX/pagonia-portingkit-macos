@@ -131,6 +131,9 @@ def acquire(app: Path, prefix: Path, wine: Path, *, fresh: bool,
         install_steam(app, prefix, wine, setup)
     graphics.configure_downloader(prefix, wine)
     (steam / "logs").mkdir(parents=True, exist_ok=True)
+    # A Resume must not mistake a retained prior login log for a fresh success.
+    for name in ("steamui_login.txt", "steamui_html.txt"):
+        (steam / "logs" / name).unlink(missing_ok=True)
     child = proc.start_wine(prefix, wine, str(steam / "steam.exe"),
                             ["-no-cef-sandbox", "-vgui"],
                             logs / "SteamUI.log", downloader=True)

@@ -1,5 +1,24 @@
 # Pioneers of Pagonia on macOS
 
+## New modular installer (unreleased)
+
+The new implementation of [INSTALLER-SPEC.md](INSTALLER-SPEC.md) has a separate entry point:
+
+    ./scripts/install-pagonia-new.sh
+
+It uses distinct Wine 11.17 **downloader** and pinned Wine 10 **gameplay** prefixes.
+It supports managed Fresh/Resume/Delete, verified Steam and depot inputs, allowlisted
+session/client snapshots, and publication with rollback. The legacy installer is not
+invoked by the new entry point and remains available pending full acceptance.
+
+The new entry accepts `--fresh`, `--resume PATH`, `--delete`, `--yes`, and
+`--gptk-lib PATH`. Fresh/Delete use one global confirmation before removing
+verified managed state; ambiguous name matches remain untouched.
+
+**Release gate:** A real interactive Apple Silicon Fresh run must complete Steam login,
+depot acquisition, Wine 10 online session validation, D3D12 device/swapchain creation,
+and visibly rendered terrain. Unit tests do not replace this final compatibility gate.
+
 This project installs the Windows Steam version of **Pioneers of Pagonia** as a
 standalone macOS Wineskin application using Apple Game Porting Toolkit 4.0 beta
 3.

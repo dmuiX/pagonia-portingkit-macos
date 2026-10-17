@@ -164,5 +164,8 @@ def locate_gptk(explicit: Path | None = None) -> Path:
         if ("game porting toolkit" in normalized or "evaluation environment for windows games" in normalized) and re.search(r"\\b4(?: 0)? beta 3\\b", normalized):
             subprocess.run(["/usr/sbin/diskutil", "image", "attach", "--nobrowse",
                             "--readOnly", str(dmg)], check=True, timeout=120)
-            return locate_gptk(None)
+            for path in sorted(Path("/Volumes").glob("*/redist/lib")):
+                if (path / "wine/x86_64-windows/d3d12.dll").is_file():
+                    return path
+            raise ValueError("Mounted GPTK image has no expected redist/lib")
     raise ValueError("GPTK 4.0 beta 3 is not mounted and its DMG was not found in Downloads")

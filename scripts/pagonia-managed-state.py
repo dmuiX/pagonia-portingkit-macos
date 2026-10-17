@@ -15,17 +15,13 @@ import subprocess
 import sys
 from typing import Any
 
+from pagonia_common import STAGING_MARKER_NAME, owner_controlled, staging_marker_state
+
 INSTALLATION_MARKER = Path("Contents/SharedSupport/pagonia-managed-state.json")
-STAGING_MARKER = Path(".pagonia-managed-state.json")
+STAGING_MARKER = Path(STAGING_MARKER_NAME)
 INSTALLATION_IDENTITY = {
     "format": 1,
     "kind": "managed-installation",
-    "owner": "pagonia-gptk4b3-installer",
-    "product": "pioneers-of-pagonia",
-}
-STAGING_IDENTITY = {
-    "format": 1,
-    "kind": "staging-deployment",
     "owner": "pagonia-gptk4b3-installer",
     "product": "pioneers-of-pagonia",
 }
@@ -77,7 +73,7 @@ def _exact_marker(path: Path, expected: dict[str, object]) -> bool:
 
 def _verified_installation(path: Path) -> bool:
     try:
-        if path.is_symlink() or not path.is_dir():
+        if path.is_symlink() or not path.is_dir() or not owner_controlled(path):
             return False
         contents = path / "Contents"
         shared_support = contents / "SharedSupport"
@@ -85,13 +81,16 @@ def _verified_installation(path: Path) -> bool:
         plist = contents / "Info.plist"
         executable_directory = contents / "MacOS"
         if any(
-            component.is_symlink() or not component.is_dir()
+            component.is_symlink() or not component.is_dir() or not owner_controlled(component)
             for component in (contents, shared_support)
         ):
             return False
-        if not _exact_marker(marker, INSTALLATION_IDENTITY) or not _regular_file(plist):
+        if (not _exact_marker(marker, INSTALLATION_IDENTITY)
+                or not owner_controlled(marker, private=True)
+                or not _regular_file(plist)
+                or not owner_controlled(plist)):
             return False
-        if executable_directory.is_symlink() or not executable_directory.is_dir():
+        if executable_directory.is_symlink() or not executable_directory.is_dir() or not owner_controlled(executable_directory):
             return False
         if marker.resolve().is_relative_to(path.resolve()) is False:
             return False
@@ -102,6 +101,25 @@ def _verified_installation(path: Path) -> bool:
         return False
 
 
+
+
+def _canonical_staging_marker(path: Path) -> bool:
+    """Accept only the shared, validated staging identity and checkpoint state."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size > 4096:
+                return False
+            data = os.read(fd, 4097)
+        finally:
+            os.close(fd)
+        marker = json.loads(data.decode("utf-8"), object_pairs_hook=_unique_object)
+        staging_marker_state(marker)
+        return True
+    except (OSError, UnicodeError, ValueError):
+        return False
+
 def _verified_staging(path: Path) -> bool:
     try:
         info = path.lstat()
@@ -111,7 +129,8 @@ def _verified_staging(path: Path) -> bool:
             and not path.is_symlink()
             and info.st_uid == os.getuid()
             and stat.S_IMODE(info.st_mode) == 0o700
-            and _exact_marker(path / STAGING_MARKER, STAGING_IDENTITY)
+            and owner_controlled(path / STAGING_MARKER, private=True)
+            and _canonical_staging_marker(path / STAGING_MARKER)
         )
     except OSError:
         return False

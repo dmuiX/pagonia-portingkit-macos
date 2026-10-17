@@ -16,7 +16,11 @@ ARCHIVES={
 }
 
 def verified_extract(key, parent):
-    from pagonia_preflight import PINS, regular_sha256
+    import importlib.util
+    spec=importlib.util.spec_from_file_location("preflight",ROOT/"pagonia-preflight.py")
+    module=importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    PINS,regular_sha256=module.PINS,module.regular_sha256
     filename, maximum, dirname=ARCHIVES[key]
     archive=ROOT/filename
     if regular_sha256(archive)!=PINS[filename]:

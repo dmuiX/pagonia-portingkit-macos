@@ -28,19 +28,34 @@ def steam_folder(prefix):
     return prefix/STEAM_REL
 
 def fetch_setup(destination):
-    if destination.exists():
-        raise ValueError("SteamSetup target already exists")
+    """Only HTTPS Valve downloads are accepted, including redirects."""
     import ssl
-    with urllib.request.urlopen(STEAM_INSTALLER_URL,timeout=90,
-                                context=ssl.create_default_context()) as response:
-        with destination.open("xb") as file:
-            digest=sha256()
-            while data:=response.read(1024*1024):
-                digest.update(data)
-                file.write(data)
-    if digest.hexdigest()!=STEAM_INSTALLER_HASH:
+    from urllib.parse import urlsplit
+
+    class HttpsRedirects(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, request, fp, code, message, headers, newurl):
+            if urlsplit(newurl).scheme.lower() != "https":
+                raise ValueError("SteamSetup redirect must remain HTTPS")
+            return super().redirect_request(request, fp, code, message, headers, newurl)
+
+    if destination.exists() or destination.is_symlink():
+        raise ValueError("SteamSetup target already exists")
+    opener = urllib.request.build_opener(
+        HttpsRedirects(), urllib.request.HTTPSHandler(context=ssl.create_default_context()))
+    try:
+        with opener.open(STEAM_INSTALLER_URL, timeout=90) as response:
+            if urlsplit(response.geturl()).scheme.lower() != "https":
+                raise ValueError("SteamSetup requires HTTPS")
+            digest = sha256()
+            with destination.open("xb") as output:
+                while data := response.read(1024 * 1024):
+                    digest.update(data)
+                    output.write(data)
+        if digest.hexdigest() != STEAM_INSTALLER_HASH:
+            raise ValueError("SteamSetup SHA-256 mismatch")
+    except BaseException:
         destination.unlink(missing_ok=True)
-        raise ValueError("SteamSetup SHA-256 mismatch")
+        raise
 
 def wait_for_depot(steam,seconds=21600):
     end=time.monotonic()+seconds

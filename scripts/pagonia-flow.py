@@ -128,8 +128,16 @@ def acceptance(app: Path) -> None:
     subprocess.run(["/usr/bin/open", "-n", str(app)], check=True, timeout=30)
     print("  If Steam displays a Cloud conflict, resolve it manually.", flush=True)
     started = time.monotonic()
+    last_report = started
     while time.monotonic() - started < 180:
-        if log.is_file():
+        processes = subprocess.run(["/bin/ps", "-U", str(os.getuid()), "-o", "command="],
+                                   capture_output=True, text=True, check=True, timeout=10).stdout
+        game_commands = [line for line in processes.splitlines()
+                         if "Pioneers of Pagonia.exe" in line]
+        command_valid = any(all(option in line for option in
+                            ("-NoDX12DeviceFactory", "-NoDX12SDKVersionCheck"))
+                            for line in game_commands)
+        if command_valid and log.is_file():
             text = log.read_text(errors="replace")
             if "Created D3D12Device" in text and "Created D3D12 Swapchain" in text:
                 print("  D3D12 device and swapchain confirmed.", flush=True)
@@ -139,8 +147,9 @@ def acceptance(app: Path) -> None:
                 if answer.strip().lower() != "y":
                     raise RuntimeError("Visible terrain was not confirmed")
                 return
-        if int(time.monotonic() - started) % 30 == 0:
-            print("  Waiting for D3D12 initialization...", flush=True)
+        if time.monotonic() - last_report >= 25:
+            print("  Waiting for the expected game command and D3D12 markers...", flush=True)
+            last_report = time.monotonic()
         time.sleep(2)
     raise RuntimeError("Game did not satisfy D3D12 initialization acceptance")
 

@@ -175,6 +175,18 @@ python3 tests/test-v1-shutdown.py
 python3 tests/test-v1-icon.py
 ```
 
+## Development and diagnostics
+
+The current repair history, real validation evidence, diagnosed installer
+failures, minimap GPU-capture results, and remaining investigation steps are
+recorded in
+[`analysis/v1.1.0-validation-and-known-issues-2026-10-18.md`](analysis/v1.1.0-validation-and-known-issues-2026-10-18.md).
+
+Earlier modular prototypes, specifications, ADRs, historical experiments, and
+superseded documentation were intentionally removed from the release tree. They
+remain available in Git history for research, but are not supported parts of the
+current installer.
+
 ## Important limitations
 
 The game is playable, but the minimap background is currently missing on the
@@ -184,3 +196,14 @@ unresolved rendering defect, not an installation failure.
 This is an unsupported compatibility setup. A Steam, game, macOS, Wine, or GPTK
 update may invalidate the pinned hashes or behavior. The installer intentionally
 refuses unknown game builds instead of applying binary modifications blindly.
+
+## Support and maintenance
+
+Most of this project was developed with AI assistance. It is published as-is,
+without regular support, troubleshooting, maintenance, or compatibility
+guarantees. Please do not assume that issues or pull requests will receive a
+response.
+
+I may update the project when I personally return to Pagonia and discover that
+it no longer works, or when I choose to test a new Apple Game Porting Toolkit
+release. Any such work will happen only when my time and interest permit.

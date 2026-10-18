@@ -18,9 +18,7 @@ The installer treats these as trusted inputs:
 
 - the tracked runtime archives whose complete SHA-256 values are pinned;
 - a read-only GPTK 4.0 beta 3 volume that matches the complete tracked manifests
-  and whose native executables satisfy Apple's signing requirement;
-- an explicitly supplied local Wine prefix, when the user opts into prefix
-  reuse.
+  and whose native executables satisfy Apple's signing requirement.
 
 Downloaded Steam setup and installed game binaries are accepted only when they
 match pinned SHA-256 values. The installer refuses root execution and rejects

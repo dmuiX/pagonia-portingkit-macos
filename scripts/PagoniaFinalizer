@@ -1,0 +1,104 @@
+#!/bin/bash
+# Shut down Steam and processes belonging to this wrapper after Pagonia exits.
+set -u
+
+mode=${1:-watch}
+cd "$(dirname "$0")/../../" || exit 1
+contents=$PWD
+prefix="$contents/SharedSupport/prefix"
+wine="$contents/SharedSupport/wine/bin/wine64"
+server="$contents/SharedSupport/wine/bin/wineserver"
+steam="$prefix/drive_c/Program Files (x86)/Steam/steam.exe"
+log="$contents/SharedSupport/Logs/PagoniaFinalizer.log"
+mkdir -p "${log%/*}"
+exec </dev/null >>"$log" 2>&1
+
+runtime_pids() {
+  /usr/sbin/lsof -t "$wine" 2>/dev/null | /usr/bin/sort -u || true
+}
+
+runtime_command_matches() {
+  local pattern=$1 pid
+  for pid in $(runtime_pids); do
+    /bin/ps -p "$pid" -o command= 2>/dev/null | /usr/bin/grep -Eq "$pattern" && return 0
+  done
+  return 1
+}
+
+game_running() {
+  runtime_command_matches '[P]ioneers of Pagonia\.exe'
+}
+
+steam_running() {
+  runtime_command_matches '[s]team\.exe|[s]teamwebhelper\.exe'
+}
+
+terminate_game() {
+  local pids='' remaining='' pid poll
+  for pid in $(runtime_pids); do
+    if /bin/ps -p "$pid" -o command= 2>/dev/null \
+      | /usr/bin/grep -q '[P]ioneers of Pagonia\.exe'; then
+      pids="$pids $pid"
+    fi
+  done
+  [[ -z "$pids" ]] && return 0
+  /bin/kill -TERM $pids 2>/dev/null || true
+  for poll in {1..5}; do
+    remaining=''
+    for pid in $pids; do
+      /bin/kill -0 "$pid" 2>/dev/null && remaining="$remaining $pid"
+    done
+    [[ -z "$remaining" ]] && return 0
+    /bin/sleep 1
+  done
+  /bin/kill -KILL $remaining 2>/dev/null || true
+}
+
+finish_runtime() {
+  local wait_limit=60 poll pids remaining
+  [[ "$mode" != quit ]] || wait_limit=15
+  if steam_running; then
+    WINEPREFIX="$prefix" "$wine" "$steam" -shutdown >/dev/null 2>&1 &
+    for ((poll = 1; poll <= wait_limit; poll++)); do
+      steam_running || break
+      /bin/sleep 2
+    done
+  fi
+  WINEPREFIX="$prefix" "$server" -k >/dev/null 2>&1 || true
+  for poll in {1..10}; do
+    pids=$(runtime_pids)
+    [[ -z "$pids" ]] && break
+    /bin/sleep 1
+  done
+  pids=$(runtime_pids)
+  if [[ -n "$pids" ]]; then
+    /bin/kill -TERM $pids 2>/dev/null || true
+    for poll in {1..5}; do
+      remaining=$(runtime_pids)
+      [[ -z "$remaining" ]] && break
+      /bin/sleep 1
+    done
+    remaining=$(runtime_pids)
+    [[ -z "$remaining" ]] || /bin/kill -KILL $remaining 2>/dev/null || true
+  fi
+  printf '%s Finalizer completed (%s).\n' "$(/bin/date '+%Y-%m-%d %H:%M:%S')" "$mode"
+}
+
+if [[ "$mode" == watch ]]; then
+  seen=0
+  for ((poll = 1; poll <= 450; poll++)); do
+    if game_running; then
+      seen=1
+      break
+    fi
+    /bin/sleep 2
+  done
+  [[ $seen -eq 1 ]] || exit 0
+  while game_running; do
+    /bin/sleep 2
+  done
+else
+  terminate_game
+fi
+
+finish_runtime

@@ -30,7 +30,7 @@ class ResumeTests(unittest.TestCase):
     def discover(self, parent):
         source = SCRIPT.read_text()
         start = source.index('find_resume_staging() {')
-        end = source.index('\nstop_if_running\n', start)
+        end = source.index('\nverify_existing_deployment() {', start)
         return subprocess.run(['bash', '-c', 'set -eu\nDESTINATION=$2\n' +
                                source[start:end] + '\nfind_resume_staging "$1"',
                                'test', str(parent), DESTINATION],

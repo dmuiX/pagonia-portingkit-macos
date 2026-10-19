@@ -92,6 +92,23 @@ restart or move the application. Recursive directory deletion is also blocked
 while Wine/Steam/launcher processes are detected; the installer never deletes
 Wine's `/tmp/.wine-*` server directory.
 
+The final launch check requires the real game process, with both required
+launch options, to remain active for ten seconds. D3D12 device and swapchain
+messages are reported only as optional diagnostic evidence because Wineskin
+does not emit them on every successful launch. Terrain rendering still requires
+visual confirmation because process and log signals cannot prove correct output.
+After that confirmation, close the game and confirm in the terminal. The
+installer then terminates a game process left behind by a closed window,
+requests a normal Steam shutdown so Cloud synchronization can finish, stops
+Wine, and terminates only residual processes using this application's pinned
+`wine64`.
+
+The installed application also includes a Wineskin lifecycle finalizer for
+normal Finder/Dock launches. Its startup hook watches for the game to exit and
+then shuts down Steam and Wine. Its Quit and Shutdown hooks additionally handle
+a game process left behind by a closed window. Forced cleanup is limited to
+processes that have this application's pinned `wine64` open.
+
 **Validation status:** a real Wine-10-only Fresh run on 18.10.2026 completed
 Steam installation, login, game download, publication, and game launch with
 both D3D12 markers. A real Resume run also completed publication and launch.
@@ -104,6 +121,21 @@ installation dialog after login. Confirm that dialog in Steam. This automatic
 request is a later change and still needs real-run verification. Steam Cloud
 conflicts are never resolved automatically. Existing external prefixes are not
 imported.
+
+To exercise the real post-installation verification path without reinstalling
+Steam or downloading the game again, close Pagonia and Windows Steam, then run:
+
+```bash
+./scripts/install-pagonia-gptk4b3.sh --verify-existing
+```
+
+This verifies the installed deployment's pinned runtime, game build, graphics
+components, Wineskin configuration, and Steam launch options. It then launches
+the existing application through the same launch-check function used after a
+fresh or resumed installation. It never republishes, renames, or deletes the
+existing application. SteamSetup, authentication, download, graphics copying,
+and atomic publication are necessarily outside this mode because they would
+require a separate installation.
 
 To remove the installed application, including its Steam login, game files, and
 local saves, run `./scripts/install-pagonia-gptk4b3.sh --delete`. It verifies the
@@ -173,6 +205,8 @@ python3 tests/test-v1-delete.py
 python3 tests/test-v1-resume.py
 python3 tests/test-v1-shutdown.py
 python3 tests/test-v1-icon.py
+python3 tests/test-v1-launch-verification.py
+python3 tests/test-v1-verify-existing.py
 ```
 
 ## Development and diagnostics

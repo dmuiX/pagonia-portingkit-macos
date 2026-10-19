@@ -8,6 +8,8 @@ set -euo pipefail
 export PATH='/usr/bin:/bin:/usr/sbin:/sbin'
 OPEN_COMMAND=${PAGONIA_OPEN_COMMAND:-/usr/bin/open}
 PGREP_COMMAND=${PAGONIA_PGREP_COMMAND:-/usr/bin/pgrep}
+PS_COMMAND=${PAGONIA_PS_COMMAND:-/bin/ps}
+LSOF_COMMAND=${PAGONIA_LSOF_COMMAND:-/usr/sbin/lsof}
 SLEEP_COMMAND=${PAGONIA_SLEEP_COMMAND:-/bin/sleep}
 WINE_PROCESS_PATTERN='steam\.exe|steamwebhelper\.exe|Pioneers of Pagonia\.exe|winedbg|wineserver|wineskinlauncher'
 
@@ -28,6 +30,7 @@ REPLACE=0
 ASSUME_YES=0
 LAUNCH_TEST=1
 DELETE_MODE=0
+VERIFY_EXISTING=0
 FRESH_ONLY=0
 RESUME_ROOT=''
 
@@ -58,6 +61,7 @@ Usage: install-pagonia-gptk4b3.sh [options]
 Options:
   --fresh               Start anew; ignore interrupted download staging.
   --delete              Remove the verified destination app and its local data.
+  --verify-existing     Verify and launch an existing deployment without reinstalling.
   --gptk-lib PATH       GPTK 4.0 beta 3 redist/lib directory.
   --destination PATH    Destination .app path.
   --replace             Back up and replace an existing destination.
@@ -74,7 +78,7 @@ Default behavior:
   5. Configure the two game-provided D3D12 bypasses in Steam LaunchOptions.
   6. Create a Pagonia application icon and register the app with Launch Services.
   7. Launch Pagonia directly through its macOS application icon.
-  8. Succeed only after D3D12 device and swapchain creation are logged.
+  8. Report D3D12 device and swapchain log evidence when available.
 EOF
 }
 
@@ -82,6 +86,7 @@ while (($#)); do
   case "$1" in
     --fresh) FRESH_ONLY=1 ;;
     --delete) DELETE_MODE=1 ;;
+    --verify-existing) VERIFY_EXISTING=1 ;;
     --gptk-lib) GPTK_LIB=${2:?Missing path}; GPTK_LIB_EXPLICIT=1; shift ;;
     --destination) DESTINATION=${2:?Missing path}; shift ;;
     --replace) REPLACE=1 ;;
@@ -92,6 +97,13 @@ while (($#)); do
   esac
   shift
 done
+
+if [[ $VERIFY_EXISTING -eq 1 ]] \
+   && [[ $FRESH_ONLY -eq 1 || $DELETE_MODE -eq 1 || $REPLACE -eq 1 \
+         || $LAUNCH_TEST -eq 0 || $GPTK_LIB_EXPLICIT -eq 1 ]]; then
+  echo 'ERROR: --verify-existing cannot be combined with installation or deletion options.' >&2
+  exit 2
+fi
 
 [[ -z "$GPTK_LIB" ]] || GPTK_LIB=${GPTK_LIB%/}
 DESTINATION=${DESTINATION%/}
@@ -546,6 +558,54 @@ if [[ "$(stat -f '%d' /tmp)" != "$(stat -f '%d' "$DESTINATION_PARENT")" ]]; then
   exit 1
 fi
 
+install_wrapper_finalizer() {
+  local app=$1 scripts="$1/Contents/Resources/Scripts"
+  require_file "$SCRIPT_DIR/PagoniaFinalizer"
+  [[ -d "$scripts" && ! -L "$scripts" ]] || {
+    echo "ERROR: Missing or linked Wineskin scripts directory: $scripts" >&2
+    return 1
+  }
+  install -m 700 "$SCRIPT_DIR/PagoniaFinalizer" "$scripts/PagoniaFinalizer"
+  cat >"$scripts/WineskinStartupScript" <<'EOF'
+#!/bin/bash
+cd "$(dirname "$0")/../../" || exit 1
+"$PWD/Resources/Scripts/PagoniaFinalizer" watch </dev/null >/dev/null 2>&1 &
+exit 0
+EOF
+  cat >"$scripts/WineskinQuitScript" <<'EOF'
+#!/bin/bash
+cd "$(dirname "$0")/../../" || exit 1
+exec "$PWD/Resources/Scripts/PagoniaFinalizer" quit
+EOF
+  cat >"$scripts/WineskinShutdownScript" <<'EOF'
+#!/bin/bash
+cd "$(dirname "$0")/../../" || exit 1
+exec "$PWD/Resources/Scripts/PagoniaFinalizer" quit
+EOF
+  chmod 700 "$scripts/WineskinStartupScript" "$scripts/WineskinQuitScript" \
+    "$scripts/WineskinShutdownScript"
+  echo '  Pagonia finalizer installed with Startup, Quit, and Shutdown hooks.'
+}
+
+verify_wrapper_finalizer() {
+  local app=$1 scripts="$1/Contents/Resources/Scripts"
+  require_file "$scripts/PagoniaFinalizer"
+  cmp -s "$SCRIPT_DIR/PagoniaFinalizer" "$scripts/PagoniaFinalizer" || {
+    echo 'ERROR: Installed Pagonia finalizer differs from the packaged finalizer.' >&2
+    return 1
+  }
+  for script in WineskinStartupScript WineskinQuitScript WineskinShutdownScript; do
+    [[ -x "$scripts/$script" && ! -L "$scripts/$script" ]] || {
+      echo "ERROR: Missing finalizer hook: $scripts/$script" >&2
+      return 1
+    }
+  done
+  grep -q 'PagoniaFinalizer.*watch' "$scripts/WineskinStartupScript"
+  grep -q 'PagoniaFinalizer.*quit' "$scripts/WineskinQuitScript"
+  grep -q 'PagoniaFinalizer.*quit' "$scripts/WineskinShutdownScript"
+  echo '  Pagonia finalizer and lifecycle hooks verified.'
+}
+
 stop_wine_app() {
   local app=$1 stop_poll probe_status quiet=0
   local prefix="$1/Contents/SharedSupport/prefix"
@@ -661,6 +721,248 @@ if candidates:
     print(candidates[0])
 PY
 }
+
+verify_existing_deployment() {
+  local app=$1 prefix wine_root lib steam game sys plist marker localconfig
+  [[ -d "$app" && ! -L "$app" && "$(stat -f '%u' "$app")" == "$UID" ]] || {
+    echo 'ERROR: Existing destination is not a trusted application directory.' >&2
+    return 1
+  }
+  for relative in Contents Contents/SharedSupport Contents/SharedSupport/wine \
+                  Contents/SharedSupport/wine/bin Contents/SharedSupport/prefix; do
+    [[ -d "$app/$relative" && ! -L "$app/$relative" ]] || {
+      echo "ERROR: Missing or linked deployment directory: $app/$relative" >&2
+      return 1
+    }
+  done
+
+  prefix="$app/Contents/SharedSupport/prefix"
+  wine_root="$app/Contents/SharedSupport/wine"
+  lib="$wine_root/lib"
+  steam="$prefix/drive_c/Program Files (x86)/Steam"
+  game="$steam/steamapps/common/Pioneers of Pagonia"
+  sys="$prefix/drive_c/windows/system32"
+  plist="$app/Contents/Info.plist"
+  marker="$app/Contents/SharedSupport/Pagonia-GPTK4b3-deployment.txt"
+
+  require_file "$marker"
+  [[ "$(head -1 "$marker")" == 'Pioneers of Pagonia GPTK deployment' ]] || {
+    echo 'ERROR: Destination is not a recognized Pagonia deployment.' >&2
+    return 1
+  }
+  require_hash "$app/Contents/MacOS/wineskinlauncher" "$EXPECTED_WINESKIN_LAUNCHER"
+  require_hash "$wine_root/bin/wine64" "$EXPECTED_WINE64"
+  require_hash "$wine_root/bin/wineserver" "$EXPECTED_WINESERVER"
+  require_hash "$wine_root/lib/wine/x86_64-unix/ntdll.so" "$EXPECTED_NTDLL_UNIX"
+  require_hash "$wine_root/lib/wine/x86_64-windows/ntdll.dll" "$EXPECTED_NTDLL_WINDOWS"
+  verify_wrapper_finalizer "$app"
+  validate_game "$prefix"
+  [[ ! -e "$game/D3D12Core.dll" ]] || {
+    echo 'ERROR: Unexpected game-local D3D12Core.dll.' >&2
+    return 1
+  }
+  require_hash "$sys/dxgi.dll" "$EXPECTED_DXGI"
+  require_hash "$sys/d3d12.dll" "$EXPECTED_D3D12"
+  require_hash "$sys/d3d12core.dll" "$EXPECTED_ENGINE_CORE"
+  grep -a -q 'PROJECT:D3DMetal-4.0b3' \
+    "$lib/external/D3DMetal.framework/Versions/A/D3DMetal" || {
+    echo 'ERROR: Installed D3DMetal is not the verified 4.0b3 build.' >&2
+    return 1
+  }
+  [[ "$(plutil -extract 'Program Name and Path' raw "$plist")" == '/Program Files (x86)/Steam/steam.exe' ]]
+  [[ "$(plutil -extract 'Program Flags' raw "$plist")" == '-applaunch 2155180' ]]
+  [[ "$(plutil -extract CFBundleIconFile raw "$plist")" == 'PagoniaGame.icns' ]]
+  require_file "$app/Contents/Resources/PagoniaGame.icns"
+  [[ "$(plutil -extract D3DMETAL raw "$plist")" == '1' ]]
+  [[ "$(plutil -extract D3DMETAL_FORCE raw "$plist")" == '1' ]]
+  [[ "$(plutil -extract 'Debug Mode' raw "$plist")" == 'true' ]]
+  [[ "$(plutil -extract 'Symlinks In User Folder' raw "$plist")" == 'false' ]]
+  [[ "$(plutil -extract WINEESYNC raw "$plist")" == '0' ]]
+  [[ "$(plutil -extract WINEMSYNC raw "$plist")" == '0' ]]
+  [[ "$(plutil -extract WINEFSYNC raw "$plist")" == '0' ]]
+  [[ "$(plutil -extract 'LSEnvironment.D3DM_MTL4' raw "$plist")" == '1' ]]
+  for localconfig in "$steam"/userdata/*/config/localconfig.vdf; do
+    [[ $(grep -c '"LaunchOptions".*"-NoDX12DeviceFactory -NoDX12SDKVersionCheck"' "$localconfig") -eq 1 ]] || {
+      echo "ERROR: Required Steam launch options are missing from $localconfig" >&2
+      return 1
+    }
+  done
+}
+
+run_launch_test() {
+  local app=$1 expected_device=$2 expected_inode=$3 log game_command option poll
+  log="$app/Contents/SharedSupport/Logs/LastRunWine.log"
+  same_identity "$app" "$expected_device" "$expected_inode" || {
+    echo 'ERROR: Application changed before launch.' >&2
+    return 1
+  }
+  # Check before removing the previous log. If the game is already running,
+  # preserve its diagnostics and require an explicit, clean user shutdown.
+  stop_if_running
+  rm -f "$log"
+  "$OPEN_COMMAND" -g -n "$app"
+  echo
+  echo 'Pioneers of Pagonia is starting through its macOS application icon.'
+  echo 'The installer is waiting up to fifteen minutes for the verified game launch.'
+  echo 'If Steam shows a Cloud conflict, choose the correct save explicitly.'
+
+  game_command=''
+  local cloud_notice_shown=0
+  local steam_console="$app/Contents/SharedSupport/prefix/drive_c/Program Files (x86)/Steam/logs/console_log.txt"
+  for poll in $(jot 450); do
+    game_command=$("$PS_COMMAND" -U "$UID" -o command= \
+      | grep '[P]ioneers of Pagonia.exe' | head -1 || true)
+    [[ -n "$game_command" ]] && break
+    if [[ $cloud_notice_shown -eq 0 && -f "$steam_console" ]] \
+       && tail -100 "$steam_console" | grep -q 'SynchronizingCloud "syncfailed"'; then
+      cloud_notice_shown=1
+      echo
+      echo 'ACTION REQUIRED: Steam is waiting for a Cloud conflict decision.'
+      echo 'Bring the Windows Steam window forward and choose the correct save.'
+    fi
+    if (( poll % 15 == 0 )); then
+      echo "  Waiting for Steam to launch Pagonia ($((poll * 2)) seconds)..."
+    fi
+    "$SLEEP_COMMAND" 2
+  done
+  if [[ -z "$game_command" ]]; then
+    echo 'ERROR: Pioneers of Pagonia did not start within fifteen minutes.' >&2
+    return 1
+  fi
+  for option in -NoDX12DeviceFactory -NoDX12SDKVersionCheck; do
+    [[ "$game_command" == *"$option"* ]] || {
+      echo "ERROR: Running game is missing $option" >&2
+      echo "$game_command" >&2
+      return 1
+    }
+  done
+
+  # A process that appears only briefly may have crashed during startup. Require
+  # the real game command, with both bypasses, to remain alive for ten seconds.
+  for poll in $(jot 5); do
+    "$SLEEP_COMMAND" 2
+    game_command=$("$PS_COMMAND" -U "$UID" -o command= \
+      | grep '[P]ioneers of Pagonia.exe' | head -1 || true)
+    [[ -n "$game_command" ]] || {
+      echo 'ERROR: Pioneers of Pagonia exited during startup verification.' >&2
+      return 1
+    }
+  done
+
+  echo
+  echo 'Game-launch checks passed:'
+  echo '  Pioneers of Pagonia remained active for ten seconds.'
+  echo '  Steam Play supplied both game-supported bypasses.'
+  if [[ -f "$log" ]] && grep -q 'Created D3D12Device' "$log" \
+     && grep -q 'Created D3D12 Swapchain' "$log"; then
+    echo '  Optional D3D12 device and swapchain diagnostics were recorded.'
+  fi
+  echo 'Pioneers of Pagonia is installed and running.'
+  echo 'ACTION REQUIRED: Load a map and verify visually that terrain renders correctly.'
+
+  local prefix wine server steam runtime_pids remaining game_pids pid
+  prefix="$app/Contents/SharedSupport/prefix"
+  wine="$app/Contents/SharedSupport/wine/bin/wine64"
+  server="$app/Contents/SharedSupport/wine/bin/wineserver"
+  steam="$prefix/drive_c/Program Files (x86)/Steam/steam.exe"
+  if [[ -t 0 && $ASSUME_YES -eq 0 ]]; then
+    printf 'Close Pioneers of Pagonia, then press Enter to shut down Steam and Wine: '
+    IFS= read -r
+  else
+    echo 'Close Pioneers of Pagonia when finished; the installer will then shut down Steam and Wine.'
+    while "$PS_COMMAND" -U "$UID" -o command= \
+      | grep -q '[P]ioneers of Pagonia.exe'; do
+      "$SLEEP_COMMAND" 2
+    done
+  fi
+
+  # Closing the game window can leave its Wine process alive. Once the user has
+  # explicitly confirmed closure, terminate only game PIDs using this runtime.
+  game_pids=''
+  for pid in $("$LSOF_COMMAND" -t "$wine" 2>/dev/null | sort -u || true); do
+    if "$PS_COMMAND" -p "$pid" -o command= \
+      | grep -q '[P]ioneers of Pagonia.exe'; then
+      game_pids="$game_pids $pid"
+    fi
+  done
+  if [[ -n "$game_pids" ]]; then
+    echo '  Terminating the Pagonia process that remained after its window closed.'
+    kill -TERM $game_pids 2>/dev/null || true
+    for poll in $(jot 10); do
+      remaining=''
+      for pid in $game_pids; do
+        kill -0 "$pid" 2>/dev/null && remaining="$remaining $pid"
+      done
+      [[ -z "$remaining" ]] && break
+      "$SLEEP_COMMAND" 1
+    done
+    [[ -z "$remaining" ]] || kill -KILL $remaining 2>/dev/null || true
+  fi
+
+  echo 'Pioneers of Pagonia closed; requesting Steam shutdown and Cloud synchronization.'
+  WINEPREFIX="$prefix" "$wine" "$steam" -shutdown >/dev/null 2>&1 &
+
+  for poll in $(jot 60); do
+    if ! "$PS_COMMAND" -U "$UID" -o command= \
+      | grep -Eq '[s]team\.exe|[s]teamwebhelper\.exe'; then
+      break
+    fi
+    if (( poll % 15 == 0 )); then
+      echo "  Waiting for Steam and Cloud synchronization ($((poll * 2)) seconds)..."
+    fi
+    "$SLEEP_COMMAND" 2
+  done
+  if "$PS_COMMAND" -U "$UID" -o command= \
+    | grep -Eq '[s]team\.exe|[s]teamwebhelper\.exe'; then
+    echo 'ERROR: Steam did not shut down within two minutes; Wine was left running to protect Cloud data.' >&2
+    return 1
+  fi
+
+  WINEPREFIX="$prefix" "$server" -k >/dev/null 2>&1 || true
+  for poll in $(jot 10); do
+    runtime_pids=$("$LSOF_COMMAND" -t "$wine" 2>/dev/null | sort -u || true)
+    [[ -z "$runtime_pids" ]] && break
+    "$SLEEP_COMMAND" 1
+  done
+  runtime_pids=$("$LSOF_COMMAND" -t "$wine" 2>/dev/null | sort -u || true)
+  if [[ -n "$runtime_pids" ]]; then
+    echo '  Terminating remaining processes from the Pagonia Wine runtime.'
+    kill -TERM $runtime_pids 2>/dev/null || true
+    for poll in $(jot 5); do
+      remaining=$("$LSOF_COMMAND" -t "$wine" 2>/dev/null | sort -u || true)
+      [[ -z "$remaining" ]] && break
+      "$SLEEP_COMMAND" 1
+    done
+    remaining=$("$LSOF_COMMAND" -t "$wine" 2>/dev/null | sort -u || true)
+    [[ -z "$remaining" ]] || kill -KILL $remaining 2>/dev/null || true
+  fi
+  "$SLEEP_COMMAND" 1
+  remaining=$("$LSOF_COMMAND" -t "$wine" 2>/dev/null | sort -u || true)
+  [[ -z "$remaining" ]] || {
+    echo 'ERROR: Pagonia Wine processes remain after shutdown.' >&2
+    return 1
+  }
+  echo 'Steam and the Pagonia Wine runtime have shut down.'
+}
+
+if [[ $VERIFY_EXISTING -eq 1 ]]; then
+  [[ -e "$DESTINATION" && ! -L "$DESTINATION" ]] || {
+    echo "ERROR: No installed deployment to verify: $DESTINATION" >&2
+    exit 1
+  }
+  VERIFY_DEVICE=$(stat -f '%d' "$DESTINATION")
+  VERIFY_INODE=$(stat -f '%i' "$DESTINATION")
+  echo "Verifying existing deployment: $DESTINATION"
+  verify_existing_deployment "$DESTINATION"
+  echo 'Existing deployment integrity checks passed.'
+  run_launch_test "$DESTINATION" "$VERIFY_DEVICE" "$VERIFY_INODE"
+  same_identity "$DESTINATION" "$VERIFY_DEVICE" "$VERIFY_INODE" || {
+    echo 'ERROR: Application changed during launch verification.' >&2
+    exit 1
+  }
+  SUCCESS=1
+  exit 0
+fi
 
 stop_if_running
 
@@ -1097,6 +1399,7 @@ PY
 
 plutil -replace 'Program Name and Path' -string '/Program Files (x86)/Steam/steam.exe' "$PLIST"
 plutil -replace 'Program Flags' -string '-applaunch 2155180' "$PLIST"
+install_wrapper_finalizer "$APP"
 
 # Use the actual transparent game icon, not Steam's promotional capsule image.
 ARTWORK="$STEAM/steam/games/$GAME_ICON_NAME"
@@ -1126,6 +1429,7 @@ require_hash "$WINE_ROOT/bin/wine64" "$EXPECTED_WINE64"
 require_hash "$WINE_ROOT/bin/wineserver" "$EXPECTED_WINESERVER"
 require_hash "$WINE_ROOT/lib/wine/x86_64-unix/ntdll.so" "$EXPECTED_NTDLL_UNIX"
 require_hash "$WINE_ROOT/lib/wine/x86_64-windows/ntdll.dll" "$EXPECTED_NTDLL_WINDOWS"
+verify_wrapper_finalizer "$APP"
 require_hash "$GAME/dxil.dll" "$EXPECTED_ORIGINAL_DXIL"
 [[ ! -e "$GAME/D3D12Core.dll" ]]
 require_hash "$SYS/dxgi.dll" "$EXPECTED_DXGI"
@@ -1236,67 +1540,6 @@ if [[ $LAUNCH_TEST -eq 0 ]]; then
   exit 0
 fi
 
-LOG="$DESTINATION/Contents/SharedSupport/Logs/LastRunWine.log"
-rm -f "$LOG"
-same_identity "$DESTINATION" "$PUBLISHED_DEVICE" "$PUBLISHED_INODE" || {
-  echo 'ERROR: Published application changed before launch.' >&2
-  exit 1
-}
-stop_if_running
-"$OPEN_COMMAND" -n "$DESTINATION"
-echo
-echo 'Pioneers of Pagonia is starting through its new application icon.'
-echo 'The installer is waiting up to fifteen minutes for the verified game launch.'
-echo 'If Steam shows a Cloud conflict, choose the correct save explicitly.'
-
-GAME_COMMAND=''
-CLOUD_NOTICE_SHOWN=0
-STEAM_CONSOLE="$DESTINATION/Contents/SharedSupport/prefix/drive_c/Program Files (x86)/Steam/logs/console_log.txt"
-for poll in $(jot 450); do
-  GAME_COMMAND=$(ps -U "$UID" -o command= \
-    | grep '[P]ioneers of Pagonia.exe' | head -1 || true)
-  [[ -n "$GAME_COMMAND" ]] && break
-  if [[ $CLOUD_NOTICE_SHOWN -eq 0 && -f "$STEAM_CONSOLE" ]] \
-     && tail -100 "$STEAM_CONSOLE" | grep -q 'SynchronizingCloud "syncfailed"'; then
-    CLOUD_NOTICE_SHOWN=1
-    echo
-    echo 'ACTION REQUIRED: Steam is waiting for a Cloud conflict decision.'
-    echo 'Bring the Windows Steam window forward and choose the correct save.'
-  fi
-  if (( poll % 15 == 0 )); then
-    echo "  Waiting for Steam to launch Pagonia ($((poll * 2)) seconds)..."
-  fi
-  "$SLEEP_COMMAND" 2
-done
-if [[ -z "$GAME_COMMAND" ]]; then
-  echo 'ERROR: Pioneers of Pagonia did not start within fifteen minutes.' >&2
-  exit 1
-fi
-for option in -NoDX12DeviceFactory -NoDX12SDKVersionCheck; do
-  [[ "$GAME_COMMAND" == *"$option"* ]] || {
-    echo "ERROR: Running game is missing $option" >&2
-    echo "$GAME_COMMAND" >&2
-    exit 1
-  }
-done
-for poll in $(jot 90); do
-  if [[ -f "$LOG" ]] && grep -q 'Created D3D12Device' "$LOG" \
-     && grep -q 'Created D3D12 Swapchain' "$LOG"; then
-    echo
-    echo 'Game-launch checks passed:'
-    echo '  Steam Play supplied both game-supported bypasses.'
-    echo '  Created D3D12Device'
-    echo '  Created D3D12 Swapchain'
-    echo 'Pioneers of Pagonia is installed and running.'
-    echo 'ACTION REQUIRED: Load a map and verify that terrain renders; log markers alone do not prove this.'
-    SUCCESS=1
-    exit 0
-  fi
-  if (( poll % 15 == 0 )); then
-    echo "  Waiting for D3D12 device and swapchain ($((poll * 2)) seconds)..."
-  fi
-  "$SLEEP_COMMAND" 2
-done
-
-echo 'ERROR: Game started, but D3D12 device/swapchain creation was not logged.' >&2
-exit 1
+run_launch_test "$DESTINATION" "$PUBLISHED_DEVICE" "$PUBLISHED_INODE"
+SUCCESS=1
+exit 0

@@ -6,7 +6,7 @@ set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd -P)
 INSTALLER="$ROOT/scripts/install-pagonia-gptk4b3.sh"
-FIXTURE_PREFIX=${PAGONIA_SIM_PREFIX:-"$HOME/Games/Pagonia-GPTK4b3"}
+FIXTURE_PREFIX=${PAGONIA_SIM_PREFIX:?Set PAGONIA_SIM_PREFIX to an explicit disposable test fixture}
 DESTINATION=${PAGONIA_SIM_DESTINATION:-'/Applications/Pagonia Installer Simulation.app'}
 MOCK_DIR=$(mktemp -d /tmp/PagoniaInstallerMocks.XXXXXX)
 PGREP_STATE="$MOCK_DIR/pgrep-state"
@@ -115,6 +115,13 @@ plist="$DESTINATION/Contents/Info.plist"
 [[ "$(/usr/bin/plutil -extract WINEESYNC raw "$plist")" == '0' ]]
 [[ "$(/usr/bin/plutil -extract WINEMSYNC raw "$plist")" == '0' ]]
 [[ "$(/usr/bin/plutil -extract WINEFSYNC raw "$plist")" == '0' ]]
+
+scripts="$DESTINATION/Contents/Resources/Scripts"
+[[ -x "$scripts/PagoniaFinalizer" && ! -L "$scripts/PagoniaFinalizer" ]]
+cmp -s "$ROOT/scripts/PagoniaFinalizer" "$scripts/PagoniaFinalizer"
+grep -q 'PagoniaFinalizer.*watch' "$scripts/WineskinStartupScript"
+grep -q 'PagoniaFinalizer.*quit' "$scripts/WineskinQuitScript"
+grep -q 'PagoniaFinalizer.*quit' "$scripts/WineskinShutdownScript"
 
 game="$DESTINATION/Contents/SharedSupport/prefix/drive_c/Program Files (x86)/Steam/steamapps/common/Pioneers of Pagonia"
 system32="$DESTINATION/Contents/SharedSupport/prefix/drive_c/windows/system32"

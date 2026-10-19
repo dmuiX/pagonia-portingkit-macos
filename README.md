@@ -1,6 +1,6 @@
 # Pioneers of Pagonia on macOS
 
-Current release: **v1.1.0**
+Current release: **v1.2.0**
 
 This project installs the Windows Steam version of **Pioneers of Pagonia** as a
 standalone macOS Wineskin application using Apple Game Porting Toolkit 4.0 beta
@@ -23,6 +23,30 @@ game content correctly, so current evidence strongly implicates the macOS
 D3D12-to-D3DMetal/Metal compatibility path. The exact failing shader or render
 stage has not yet been identified. See
 [`analysis/v1.1.0-validation-and-known-issues-2026-10-18.md`](analysis/v1.1.0-validation-and-known-issues-2026-10-18.md).
+
+## What's new in v1.2.0
+
+- The generated macOS application now includes a lifecycle finalizer. Normal
+  Finder/Dock launches automatically shut down Windows Steam and Wine after the
+  game exits. Wineskin Quit and Shutdown hooks also clean up a game process that
+  remains after its window closes.
+- Forced cleanup is scoped to processes that have this application's pinned
+  `wine64` open, avoiding unrelated Wine installations.
+- Launch verification now requires the real Pagonia process, both supported
+  D3D12 bypass options, and ten seconds of process stability. The inconsistent
+  D3D12 device/swapchain log strings are optional diagnostics rather than a
+  blocking success condition.
+- Interactive installation verification waits for visual acceptance, requests
+  a normal Steam shutdown for Cloud synchronization, and then confirms that the
+  Pagonia Wine runtime has stopped.
+- `--verify-existing` verifies the installed finalizer and all three lifecycle
+  hooks in addition to runtime, game, graphics, and Steam configuration.
+- The installer explicitly reports finalizer installation and verification.
+
+The v1.2.0 lifecycle changes were exercised against the existing real deployment
+and by focused regression and security tests. The complete Steam Fresh and
+Resume download paths retain their v1.1.0 design and automated coverage, but
+were not repeated end to end for this release.
 
 ## Verified configuration
 
@@ -205,6 +229,7 @@ python3 tests/test-v1-delete.py
 python3 tests/test-v1-resume.py
 python3 tests/test-v1-shutdown.py
 python3 tests/test-v1-icon.py
+python3 tests/test-v1-finalizer.py
 python3 tests/test-v1-launch-verification.py
 python3 tests/test-v1-verify-existing.py
 ```
